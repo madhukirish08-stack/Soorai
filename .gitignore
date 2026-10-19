@@ -1,0 +1,21 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE & Editor folders
+.vscode/
+.idea/
+
+# Large model binaries (>100MB blocked by GitHub standard push)
+# Can be generated in 1 click via web UI or: python backend/train_model.py
+*.pkl
+
+# Temporary or large uncompressed datasets (>25MB)
+data/data.csv
