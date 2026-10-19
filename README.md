@@ -67,8 +67,3 @@ You can train or retrain the model at any time:
 
 ---
 
-## 👥 Adding Team Members
-
-1. In your GitHub repository: go to **Settings** > **Collaborators** > **Add people**.
-2. Invite your team members with **Write** access.
-3. Teammates can clone and run immediately using the instructions above.
