@@ -670,6 +670,44 @@ td.health-cell { }
 .overlay-text { font-size: 18px; font-weight: 700; color: #fff; margin-bottom: 8px; }
 .overlay-sub { font-size: 13px; color: var(--text-muted); }
 
+/* ── Column mapping review ──────────────────────────────── */
+.mapping-card { border-color: var(--accent); }
+.mapping-source {
+  margin-left: auto; font-size: 11px; font-weight: 600; color: var(--purple);
+  background: rgba(167,139,250,0.10); padding: 3px 10px; border-radius: 999px;
+}
+.mapping-table td { vertical-align: top; }
+.mapping-table td.map-src { color: var(--text); font-weight: 600; white-space: nowrap; }
+.mapping-table td.map-samples { max-width: 180px; font-size: 12px; overflow-wrap: anywhere; }
+.mapping-table td.map-reason { font-family: 'Inter', sans-serif; font-size: 12px; color: var(--text-muted); min-width: 200px; }
+.mapping-table input[type="number"] { width: 90px; padding: 6px 8px; font-size: 12px; }
+select {
+  background: var(--bg-input); border: 1.5px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--text); padding: 6px 8px; font-size: 12px; font-family: 'Inter', sans-serif; max-width: 260px;
+}
+select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+.conf-pill { padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+.conf-high { color: var(--green); background: var(--green-glow); }
+.conf-mid  { color: var(--amber); background: var(--amber-glow); }
+.conf-low  { color: var(--red);   background: var(--red-glow); }
+
+.notice {
+  border-radius: var(--radius-sm); padding: 10px 14px; margin: 10px 0;
+  font-size: 13px; line-height: 1.5; border-left: 3px solid;
+}
+.notice-warn  { background: var(--amber-glow); border-color: var(--amber); color: var(--text); }
+.notice-error { background: var(--red-glow);   border-color: var(--red);   color: var(--text); }
+.notice-ok    { background: var(--green-glow); border-color: var(--green); color: var(--text); }
+
+.map-status { margin-left: 8px; font-size: 11px; font-weight: 600; }
+.map-status.map-approved   { color: var(--green); }
+.map-status.map-not_needed { color: var(--text-muted); }
+.map-status.map-required   { color: var(--amber); }
+
+/* Inputs the current model does not use */
+.form-group.unused { opacity: 0.4; }
+.form-group.unused input { cursor: not-allowed; }
+
 /* ── Misc ─────────────────────────────────────────────────── */
 .hidden { display: none !important; }
 

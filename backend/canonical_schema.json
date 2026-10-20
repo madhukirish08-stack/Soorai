@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "description": "Canonical belt-telemetry schema. Every uploaded dataset is mapped onto these names before training. 'range' is the physically plausible range in the canonical unit and is only used for sanity warnings.",
+  "fields": {
+    "belt_id":                 {"role": "id",           "label": "Belt / asset ID",            "unit": null,      "description": "Unique identifier of the belt or conveyor the reading belongs to"},
+    "hour":                    {"role": "time",         "label": "Operating hours",            "unit": "h",       "range": [0, 200000],   "description": "Cumulative operating hours of the belt at the time of the reading"},
+    "timestamp":               {"role": "timestamp",    "label": "Reading timestamp",          "unit": "datetime",                          "description": "Date/time of the reading. Converted to hours since the belt's first reading when 'hour' is not available"},
+
+    "rubber_hardness_shore_a": {"role": "feature", "group": "static",    "label": "Rubber hardness",      "unit": "Shore A", "range": [40, 95],      "description": "Cover rubber hardness"},
+    "belt_thickness_mm":       {"role": "feature", "group": "static",    "label": "Belt thickness",       "unit": "mm",      "range": [5, 40],       "description": "Total belt thickness"},
+    "tensile_strength_kn_m":   {"role": "feature", "group": "static",    "label": "Tensile strength",     "unit": "kN/m",    "range": [200, 3500],   "description": "Rated tensile strength (N/mm == kN/m)"},
+    "belt_width_mm":           {"role": "feature", "group": "static",    "label": "Belt width",           "unit": "mm",      "range": [300, 3000],   "description": "Belt width"},
+    "belt_length_mm":          {"role": "feature", "group": "static",    "label": "Belt length",          "unit": "mm",      "range": [5000, 2000000], "description": "Belt loop length"},
+    "cover_thickness_top_mm":  {"role": "feature", "group": "static",    "label": "Top cover thickness",  "unit": "mm",      "range": [1, 25],       "description": "Top cover rubber thickness"},
+    "pulley_alignment_mm":     {"role": "feature", "group": "static",    "label": "Pulley misalignment",  "unit": "mm",      "range": [-25, 25],     "description": "Pulley alignment offset"},
+
+    "load_pct":                {"role": "feature", "group": "operating", "label": "Load",                 "unit": "%",       "range": [0, 130],      "description": "Load as a percentage of rated capacity"},
+    "belt_speed_mps":          {"role": "feature", "group": "operating", "label": "Belt speed",           "unit": "m/s",     "range": [0, 10],       "description": "Belt linear speed"},
+    "temperature_c":           {"role": "feature", "group": "operating", "label": "Temperature",          "unit": "°C",      "range": [-40, 150],    "description": "Belt / ambient operating temperature"},
+    "humidity_pct":            {"role": "feature", "group": "operating", "label": "Humidity",             "unit": "%",       "range": [0, 100],      "description": "Relative humidity"},
+    "vibration_mms":           {"role": "feature", "group": "operating", "label": "Vibration",            "unit": "mm/s",    "range": [0, 50],       "description": "Vibration velocity (RMS)"},
+    "torque_nm":               {"role": "feature", "group": "operating", "label": "Drive torque",         "unit": "N·m",     "range": [0, 500000],   "description": "Drive pulley / motor torque"},
+    "belt_tension_n":          {"role": "feature", "group": "operating", "label": "Belt tension",         "unit": "N",       "range": [0, 2000000],  "description": "Belt tension"},
+    "maintenance_count":       {"role": "feature", "group": "operating", "label": "Maintenance count",    "unit": "count",   "range": [0, 1000],     "description": "Number of maintenance actions performed so far"},
+
+    "wear_pct":                {"role": "degradation", "label": "Surface wear",  "unit": "%",  "range": [0, 100], "failure_threshold": 100, "description": "Cover wear as a percentage of allowable wear"},
+    "elongation_pct":          {"role": "degradation", "label": "Elongation",    "unit": "%",  "range": [0, 10],  "failure_threshold": 4,   "description": "Permanent elongation as a percentage of original length"},
+    "crack_length_mm":         {"role": "degradation", "label": "Crack length",  "unit": "mm", "range": [0, 500], "failure_threshold": 50,  "description": "Longest crack / tear length"},
+
+    "rul_hours":               {"role": "target",       "label": "Remaining useful life", "unit": "h", "range": [0, 200000], "description": "Measured remaining operating hours until failure/replacement"},
+    "failure_hour":            {"role": "failure_time", "label": "Failure / replacement hour", "unit": "h", "range": [0, 200000], "description": "Operating hour at which the belt actually failed or was replaced"}
+  }
+}

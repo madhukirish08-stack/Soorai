@@ -110,14 +110,41 @@
           <input type="file" id="upload-file" accept=".csv" onchange="uploadDataset()" hidden />
           <div class="upload-icon">📄</div>
           <div class="upload-text">Drag & drop a CSV file here or <span class="link">click to browse</span></div>
-          <div class="upload-hint">Must contain belt_rul columns (from training_data_5_oct.py)</div>
+          <div class="upload-hint">Any belt telemetry CSV — columns are mapped to the model schema in the next step</div>
         </label>
         <div id="upload-status" class="hidden"></div>
+      </div>
+
+      <!-- Column mapping review (human-in-the-loop: LLM proposes, user approves) -->
+      <div class="card mapping-card hidden" id="mapping-card">
+        <div class="card-title"><span class="card-icon">🧭</span> Review Column Mapping
+          <span class="mapping-source" id="mapping-source"></span>
+        </div>
+        <p class="card-desc">
+          Each column of your dataset is matched to a field the model understands. Check every row —
+          especially low-confidence ones and unit conversions (<code>model value = raw × scale + offset</code>).
+          Nothing is used for training until you approve.
+        </p>
+        <div id="mapping-warnings"></div>
+        <div class="table-wrap">
+          <table class="inspection-table mapping-table">
+            <thead>
+              <tr><th>Your column</th><th>Sample values</th><th>Maps to</th><th>Confidence</th><th>Scale</th><th>Offset</th><th>Why</th></tr>
+            </thead>
+            <tbody id="mapping-tbody"></tbody>
+          </table>
+        </div>
+        <div id="mapping-result"></div>
+        <div class="action-row">
+          <button class="btn btn-ghost" onclick="closeMapping()">Cancel</button>
+          <button class="btn btn-primary" id="btn-approve-mapping" onclick="approveMapping()">✓ Approve Mapping</button>
+        </div>
       </div>
 
       <!-- Train model button -->
       <div class="action-row">
         <div id="selected-dataset-display" class="selected-info">No dataset selected</div>
+        <button class="btn btn-outline" id="btn-map" onclick="openMapping()" disabled>🧭 Review Column Mapping</button>
         <button class="btn btn-primary btn-large" id="btn-train" onclick="trainModel()" disabled>
           <span class="btn-spinner hidden" id="train-spinner">⟳</span>
           Train Model on Selected Dataset
@@ -249,6 +276,13 @@
                 <input type="range" class="slider" id="insp-vib-slider" min="1" max="20" step="0.1" value="4.0" oninput="syncSlider('insp-vib','insp-vib-slider')" />
               </div>
             </div>
+          </div>
+
+          <!-- Inputs for model features that have no fixed field above (built from the trained model) -->
+          <div class="card hidden" id="extra-inputs-card">
+            <div class="card-title"><span class="card-icon">➕</span> Additional Model Inputs</div>
+            <p class="card-desc">The current model was trained on these extra columns. Pre-filled with the training median — replace with your readings.</p>
+            <div class="form-row cols-2" id="extra-inputs"></div>
           </div>
 
           <div class="card">

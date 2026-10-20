@@ -10,20 +10,21 @@ Endpoints:
   POST /train                 - Train (or retrain) on the selected dataset
   POST /predict               - Predict RUL with confidence from inspection readings
   POST /generate-data         - Run training_data_5_oct.py to generate fresh data
+  GET  /schema                - Canonical schema the model is trained on
+  POST /schema/propose        - LLM (Gemini) column-mapping proposal for a dataset
+  POST /schema/approve        - Validate + save a human-approved column mapping
 """
 
 import os
 import sys
 import json
-import shutil
 import asyncio
 import io
 import joblib
 import numpy as np
 import pandas as pd
-from pathlib import Path
-from typing import List, Dict, Any, Optional
-from fastapi import FastAPI, Request, UploadFile, File, Form
+from typing import Dict, Any, Optional
+from fastapi import FastAPI, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -31,6 +32,7 @@ import traceback
 
 # Add v2 backend to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import schema_mapper as sm
 
 app = FastAPI(title="Belt RUL Prediction API v2")
 
@@ -54,6 +56,8 @@ TRAINING_SCRIPT = (
     else os.path.join(PARENT_DIR, "training", "training_data_5_oct.py")
 )
 
+MAPPINGS_DIR = os.path.join(BASE_DIR, "mappings")
+
 os.makedirs(MODELS_DIR, exist_ok=True)
 os.makedirs(DATA_DIR,   exist_ok=True)
 
@@ -66,28 +70,6 @@ async def root():
 
 # ── Global model state ────────────────────────────────────────────────────────
 MODEL_PAYLOAD: Optional[Dict] = None
-
-FEATURE_COLS = [
-    "rubber_hardness_shore_a",
-    "belt_thickness_mm",
-    "tensile_strength_kn_m",
-    "belt_width_mm",
-    "belt_length_mm",
-    "cover_thickness_top_mm",
-    "pulley_alignment_mm",
-    "load_pct",
-    "belt_speed_mps",
-    "temperature_c",
-    "humidity_pct",
-    "vibration_mms",
-    "torque_nm",
-    "belt_tension_n",
-    "maintenance_count",
-    "wear_pct",
-    "elongation_pct",
-    "crack_length_mm",
-    "hour",
-]
 
 # Confidence grows with number of inspections performed
 def compute_confidence(n_inspections: int, r2: float) -> float:
@@ -122,6 +104,19 @@ async def startup_event():
 # Dataset endpoints
 # ─────────────────────────────────────────────────────────────────────────────
 
+def resolve_dataset(csv_path: str) -> str:
+    """Datasets are always resolved inside DATA_DIR (blocks path traversal via csv_path)."""
+    return os.path.join(DATA_DIR, os.path.basename(csv_path or ""))
+
+
+def mapping_status(filename: str, columns) -> str:
+    if sm.load_mapping(MAPPINGS_DIR, filename, columns):
+        return "approved"
+    if sm.is_legacy_canonical(columns):
+        return "not_needed"
+    return "required"
+
+
 @app.get("/datasets")
 async def list_datasets():
     """List all CSV datasets available in the data/ folder."""
@@ -142,6 +137,7 @@ async def list_datasets():
                     "path": full,
                     "size_mb": size_mb,
                     "columns": cols,
+                    "mapping_status": mapping_status(f, cols),
                 })
     return {"datasets": csvs, "data_dir": DATA_DIR}
 
@@ -221,29 +217,88 @@ async def train_model(request: Request):
     """Train on the specified CSV dataset."""
     global MODEL_PAYLOAD
     body    = await request.json()
-    csv_path = body.get("csv_path", os.path.join(DATA_DIR, "belt_rul_training_data.csv"))
+    csv_path = resolve_dataset(body.get("csv_path", "belt_rul_training_data.csv"))
 
     if not os.path.exists(csv_path):
         return JSONResponse(status_code=404,
             content={"error": f"Dataset not found: {csv_path}"})
 
+    columns = list(pd.read_csv(csv_path, nrows=0).columns)
+    saved = sm.load_mapping(MAPPINGS_DIR, csv_path, columns)
+    # Human-in-the-loop gate (user requirement): a dataset whose columns are not already
+    # canonical must have a human-APPROVED mapping. Do not relax this to auto-apply LLM output.
+    if saved is None and not sm.is_legacy_canonical(columns):
+        return JSONResponse(status_code=409, content={
+            "error": "This dataset's columns must be mapped and approved before training.",
+            "mapping_required": True,
+        })
+
     try:
         # Dynamically import to avoid circular import issues
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from train_model import train
-        payload = train(csv_path, MODELS_DIR)
+        payload = train(csv_path, MODELS_DIR, saved["mapping"] if saved else None)
         MODEL_PAYLOAD = payload
         return {
             "success": True,
             "metrics": payload["metrics"],
             "feature_importance": payload["feature_importance"],
-            "training_rows": int(len(pd.read_csv(csv_path))),
+            "feature_cols": payload["feature_cols"],
+            "rul_source": payload["rul_source"],
+            "training_rows": payload["training_rows"],
         }
     except Exception as e:
         return JSONResponse(status_code=500, content={
             "error": str(e),
             "traceback": traceback.format_exc()
         })
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Schema mapping endpoints (LLM proposes, human approves)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/schema")
+async def get_schema():
+    return sm.load_canonical()
+
+
+@app.post("/schema/propose")
+def propose_schema(body: Dict[str, Any]):
+    """Sync def -> FastAPI runs it in a worker thread, so the Gemini call doesn't block the loop."""
+    csv_path = resolve_dataset(body.get("csv_path"))
+    if not os.path.exists(csv_path):
+        return JSONResponse(status_code=404, content={"error": f"Dataset not found: {csv_path}"})
+    try:
+        raw = pd.read_csv(csv_path)
+        saved = sm.load_mapping(MAPPINGS_DIR, csv_path, raw.columns)
+        if saved:
+            proposal = {"source": "approved", "mapping": saved["mapping"],
+                        "profile": sm.profile_dataframe(raw), "warnings": []}
+        else:
+            proposal = sm.propose_mapping(raw, MAPPINGS_DIR)
+        proposal["already_approved"] = saved is not None
+        proposal["canonical_fields"] = sm.load_canonical()["fields"]
+        return proposal
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e), "traceback": traceback.format_exc()})
+
+
+@app.post("/schema/approve")
+def approve_schema(body: Dict[str, Any]):
+    csv_path = resolve_dataset(body.get("csv_path"))
+    mapping  = body.get("mapping") or []
+    if not os.path.exists(csv_path):
+        return JSONResponse(status_code=404, content={"error": f"Dataset not found: {csv_path}"})
+    raw = pd.read_csv(csv_path)
+    errors, warnings, rul_info = sm.validate_mapping(raw, mapping)
+    if errors:
+        return JSONResponse(status_code=422, content={"saved": False, "errors": errors, "warnings": warnings})
+    if body.get("dry_run"):
+        # UI validates first so the reviewer sees warnings BEFORE anything is saved
+        return {"saved": False, "errors": [], "warnings": warnings, "rul_source": rul_info}
+    sm.save_mapping(MAPPINGS_DIR, csv_path, raw.columns, mapping, body.get("proposal_source", "manual"))
+    return {"saved": True, "errors": [], "warnings": warnings, "rul_source": rul_info}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -260,6 +315,7 @@ async def get_metadata():
         return {"error": "No model trained yet."}
     return {
         "feature_cols": MODEL_PAYLOAD["feature_cols"],
+        "rul_source": MODEL_PAYLOAD.get("rul_source"),
         "metrics": MODEL_PAYLOAD["metrics"],
         "feature_stats": MODEL_PAYLOAD["feature_stats"],
         "feature_importance": MODEL_PAYLOAD["feature_importance"],
@@ -312,75 +368,60 @@ async def predict(request: Request):
         return JSONResponse(status_code=400, content={"error": "No inspection readings provided."})
 
     xgb_model = MODEL_PAYLOAD["xgb_model"]
-    rf_model  = MODEL_PAYLOAD["rf_model"]
     feat_cols = MODEL_PAYLOAD["feature_cols"]
     feat_stats = MODEL_PAYLOAD["feature_stats"]
-    r2 = MODEL_PAYLOAD["metrics"]["ensemble"]["r2_score"]
+    r2 = MODEL_PAYLOAD["metrics"]["xgboost"]["r2_score"]
+
+    # Health/failure thresholds only for degradation measures the model was trained on
+    thresholds = sm.degradation_thresholds(feat_cols)
+    schema_fields = sm.load_canonical()["fields"]
 
     results = []
     for idx, insp in enumerate(inspections):
-        row = {
-            "rubber_hardness_shore_a": belt_props.get("rubber_hardness_shore_a", 65.0),
-            "belt_thickness_mm":       belt_props.get("belt_thickness_mm", 15.0),
-            "tensile_strength_kn_m":   belt_props.get("tensile_strength_kn_m", 1000.0),
-            "belt_width_mm":           belt_props.get("belt_width_mm", 1000.0),
-            "belt_length_mm":          belt_props.get("belt_length_mm", 50000.0),
-            "cover_thickness_top_mm":  belt_props.get("cover_thickness_top_mm", 6.0),
-            "pulley_alignment_mm":     belt_props.get("pulley_alignment_mm", 0.0),
-            "load_pct":        insp.get("load_pct", 70.0),
-            "belt_speed_mps":  insp.get("belt_speed_mps", 3.0),
-            "temperature_c":   insp.get("temperature_c", 30.0),
-            "humidity_pct":    insp.get("humidity_pct", 60.0),
-            "vibration_mms":   insp.get("vibration_mms", 4.0),
-            "torque_nm":       insp.get("torque_nm", 1000.0),
-            "belt_tension_n":  insp.get("belt_tension_n", 840.0),
-            "maintenance_count": insp.get("maintenance_count", 0),
-            "wear_pct":        insp.get("wear_pct", 0.0),
-            "elongation_pct":  insp.get("elongation_pct", 0.0),
-            "crack_length_mm": insp.get("crack_length_mm", 0.0),
-            "hour":            insp.get("hour", 0),
-        }
+        # Feature vector follows the TRAINED model's feature list (dataset-dependent).
+        # Missing inputs fall back to the training median instead of hard-coded defaults,
+        # so models trained on customer data with different columns still predict.
+        row = {}
+        for col in feat_cols:
+            val = insp.get(col, belt_props.get(col))
+            row[col] = float(val) if val is not None else feat_stats.get(col, {}).get("median", 0.0)
+        hour = float(insp.get("hour", row.get("hour", 0.0)))
 
         X = pd.DataFrame([row])[feat_cols]
         pred_xgb = float(xgb_model.predict(X)[0])
-        pred_rf  = float(rf_model.predict(X)[0])
-        pred_ens = (pred_xgb + pred_rf) / 2
-        pred_rul = max(pred_ens, 0.0)
+        pred_rul = max(pred_xgb, 0.0)
+
+        # Degradation ratios use only values actually measured in this inspection
+        ratios = {}
+        for col, thr in thresholds.items():
+            val = insp.get(col)
+            if val is not None:
+                ratios[schema_fields[col]["label"]] = float(val) / thr
 
         # Physics override clamp: if any failure threshold is met, RUL is strictly 0
-        if row["wear_pct"] >= 100.0 or row["elongation_pct"] >= 4.0 or row["crack_length_mm"] >= 50.0:
+        if any(r >= 1.0 for r in ratios.values()):
             pred_rul = 0.0
 
         # Confidence grows with more inspections
         confidence = compute_confidence(idx + 1, r2)
 
-        # Health score: inverse of degradation ratio
-        # wear threshold=100%, elongation=4%, crack=50mm
-        wear_ratio  = row["wear_pct"] / 100.0
-        elong_ratio = row["elongation_pct"] / 4.0
-        crack_ratio = row["crack_length_mm"] / 50.0
-        degradation = max(wear_ratio, elong_ratio, crack_ratio)
-        health_score = round(max(1 - degradation, 0.0) * 100, 1)
-
-        # Dominant failure driver
-        drivers = {
-            "Wear":       wear_ratio,
-            "Elongation": elong_ratio,
-            "Crack":      crack_ratio,
-        }
-        dominant = max(drivers, key=drivers.get)
+        # Health score: inverse of the worst degradation ratio (None if nothing measured)
+        if ratios:
+            health_score = round(max(1 - max(ratios.values()), 0.0) * 100, 1)
+            dominant = max(ratios, key=ratios.get)
+        else:
+            health_score, dominant = None, "N/A"
 
         results.append({
             "inspection_index": int(idx + 1),
-            "hour":             float(row["hour"]),
+            "hour":             hour,
             "rul_hours":        float(round(pred_rul, 0)),
             "confidence_pct":   float(confidence),
-            "health_score":     float(health_score),
+            "health_score":     health_score,
             "dominant_driver":  str(dominant),
             "degradation_state": {
-                "wear_pct":        float(row["wear_pct"]),
-                "elongation_pct":  float(row["elongation_pct"]),
-                "crack_length_mm": float(row["crack_length_mm"]),
+                c: (float(insp[c]) if c in thresholds and insp.get(c) is not None else None)
+                for c in ("wear_pct", "elongation_pct", "crack_length_mm")
             },
         })
 
@@ -390,7 +431,7 @@ async def predict(request: Request):
         "total_inspections": len(inspections),
         "latest_prediction": latest,
         "prediction_history": results,
-        "model_metrics": MODEL_PAYLOAD["metrics"]["ensemble"],
+        "model_metrics": MODEL_PAYLOAD["metrics"]["xgboost"],
     }
 
 

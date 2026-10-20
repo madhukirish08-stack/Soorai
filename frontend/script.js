@@ -11,13 +11,17 @@ const API = (window.location.origin && (window.location.origin.includes('localho
 
 // ── State ──────────────────────────────────────────────────────────────────
 let selectedDatasetPath = null;
+let selectedDataset     = null;    // dataset object from /datasets (incl. mapping_status)
+let currentProposal     = null;    // last /schema/propose response
+let canonicalFields     = {};      // canonical schema fields from /schema
 let modelLoaded         = false;
 let beltProperties      = {};
 let inspections         = [];      // accumulated inspection records
 let rulChart            = null;    // Chart.js instance
 
 // ── Init ───────────────────────────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
+  try { canonicalFields = (await (await fetch(`${API}/schema`)).json()).fields || {}; } catch {}
   loadDatasets();
   checkModelStatus();
   setupDragDrop();
@@ -47,8 +51,9 @@ async function checkModelStatus() {
     const res = await fetch(`${API}/metadata`);
     const data = await res.json();
     if (data.metrics) {
-      setModelStatus('ready', `Model ready — R² ${data.metrics.ensemble?.r2_score ?? '—'}`);
+      setModelStatus('ready', `Model ready — R² ${data.metrics.xgboost?.r2_score ?? '—'}`);
       modelLoaded = true;
+      configureFormForModel(data.feature_cols || [], data.feature_stats || {});
     }
   } catch {
     setModelStatus('idle', 'No model loaded');
@@ -78,18 +83,21 @@ async function loadDatasets() {
       const item = document.createElement('div');
       item.className = 'dataset-item';
       item.dataset.path = ds.path;
-      // Auto-select the canonical training file
-      if (ds.filename === 'belt_rul_training_data.csv') {
+      // Keep the current selection across refreshes; otherwise auto-select the canonical training file
+      if (selectedDataset ? ds.filename === selectedDataset.filename : ds.filename === 'belt_rul_training_data.csv') {
         item.classList.add('selected');
         selectedDatasetPath = ds.path;
+        selectedDataset = ds;
         updateSelectedDisplay(ds.filename);
-        document.getElementById('btn-train').disabled = false;
+        updateActionButtons();
       }
+      const statusLabel = { approved: '✓ mapping approved', not_needed: 'model schema', required: '⚠ mapping required' }[ds.mapping_status] || '';
       item.innerHTML = `
         <div class="dataset-icon">📊</div>
         <div>
-          <div class="dataset-name">${ds.filename}</div>
-          <div class="dataset-meta">${ds.size_mb} MB — ${ds.columns.length} columns</div>
+          <div class="dataset-name">${escapeHtml(ds.filename)}</div>
+          <div class="dataset-meta">${ds.size_mb} MB — ${ds.columns.length} columns
+            <span class="map-status map-${ds.mapping_status}">${statusLabel}</span></div>
         </div>
         <div class="dataset-check">✓</div>
       `;
@@ -105,8 +113,163 @@ function selectDataset(item, ds) {
   document.querySelectorAll('.dataset-item').forEach(el => el.classList.remove('selected'));
   item.classList.add('selected');
   selectedDatasetPath = ds.path;
+  selectedDataset = ds;
   updateSelectedDisplay(ds.filename);
-  document.getElementById('btn-train').disabled = false;
+  closeMapping();
+  updateActionButtons();
+}
+
+// Training stays locked until a non-canonical dataset has a human-approved mapping.
+function updateActionButtons() {
+  const status = selectedDataset?.mapping_status;
+  document.getElementById('btn-map').disabled = !selectedDataset;
+  document.getElementById('btn-train').disabled = !selectedDataset || status === 'required';
+  document.getElementById('btn-train').title = status === 'required' ? 'Review and approve the column mapping first' : '';
+}
+
+// ── Column mapping review (LLM proposes → human approves) ─────────────────
+async function openMapping() {
+  if (!selectedDataset) return;
+  showOverlay('Analysing dataset columns…', 'Asking the AI to match your columns to the model schema.');
+  try {
+    const res  = await fetch(`${API}/schema/propose`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ csv_path: selectedDataset.filename }),
+    });
+    const data = await res.json();
+    hideOverlay();
+    if (data.error) { toast(`Mapping failed: ${data.error}`, 'error'); return; }
+    currentProposal = data;
+    renderMapping(data);
+  } catch (e) {
+    hideOverlay();
+    toast(`Network error: ${e.message}`, 'error');
+  }
+}
+
+function renderMapping(data) {
+  const sourceText = {
+    llm: 'Proposed by Gemini', heuristic: 'Name matching (no AI)', exact: 'Exact name match',
+    saved_profile: 'Re-used saved profile', approved: 'Previously approved',
+  }[data.source] || data.source;
+  document.getElementById('mapping-source').textContent = sourceText;
+  document.getElementById('mapping-warnings').innerHTML = (data.warnings || [])
+    .map(w => `<div class="notice notice-warn">${escapeHtml(w)}</div>`).join('');
+  document.getElementById('mapping-result').innerHTML = '';
+
+  const profile = Object.fromEntries((data.profile || []).map(p => [p.name, p]));
+  const fields  = data.canonical_fields || canonicalFields;
+  const options = [
+    ['__ignore__', '— Ignore column —'],
+    ['__extra__',  '+ Extra feature (keep as-is)'],
+    ...Object.entries(fields).map(([k, f]) => [k, `${f.label}${f.unit ? ` (${f.unit})` : ''} · ${k}`]),
+  ];
+
+  const tbody = document.getElementById('mapping-tbody');
+  tbody.innerHTML = '';
+  data.mapping.forEach(m => {
+    const p = profile[m.source] || {};
+    const conf = Math.round((m.confidence ?? 0) * 100);
+    const confClass = conf >= 80 ? 'conf-high' : conf >= 50 ? 'conf-mid' : 'conf-low';
+    const range = p.min !== undefined ? `<div class="hint">${fmt(p.min)} … ${fmt(p.max)}</div>` : '';
+    const tr = document.createElement('tr');
+    tr.dataset.source = m.source;
+    tr.innerHTML = `
+      <td class="map-src">${escapeHtml(m.source)}</td>
+      <td class="map-samples">${escapeHtml((p.samples || []).slice(0, 3).join(', '))}${range}</td>
+      <td><select class="map-target">${options.map(([v, l]) =>
+        `<option value="${escapeHtml(v)}"${v === m.target ? ' selected' : ''}>${escapeHtml(l)}</option>`).join('')}</select></td>
+      <td><span class="conf-pill ${confClass}">${conf}%</span></td>
+      <td><input type="number" class="map-scale" step="any" value="${m.scale ?? 1}" /></td>
+      <td><input type="number" class="map-offset" step="any" value="${m.offset ?? 0}" /></td>
+      <td class="map-reason">${escapeHtml(m.reason || '')}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+  resetMappingConfirmation();
+  tbody.oninput = tbody.onchange = resetMappingConfirmation;
+  document.getElementById('mapping-card').classList.remove('hidden');
+  document.getElementById('mapping-card').scrollIntoView({ behavior: 'smooth' });
+}
+
+function closeMapping() {
+  document.getElementById('mapping-card').classList.add('hidden');
+  currentProposal = null;
+}
+
+// Two-step approval: validate (dry run) and show warnings first; saving with warnings
+// needs an explicit "Approve anyway". Editing any row resets it. Keep this - unit/mapping
+// warnings flag silent model corruption and must be seen BEFORE the mapping is saved.
+let mappingWarningsSeen = false;
+
+function resetMappingConfirmation() {
+  mappingWarningsSeen = false;
+  document.getElementById('btn-approve-mapping').textContent = '✓ Approve Mapping';
+}
+
+async function approveMapping() {
+  const mapping = [...document.querySelectorAll('#mapping-tbody tr')].map(tr => ({
+    source: tr.dataset.source,
+    target: tr.querySelector('.map-target').value,
+    scale:  parseFloat(tr.querySelector('.map-scale').value),
+    offset: parseFloat(tr.querySelector('.map-offset').value),
+    confidence: (currentProposal?.mapping.find(m => m.source === tr.dataset.source)?.confidence) ?? 1,
+    reason: tr.querySelector('.map-reason').textContent,
+  }));
+  if (mapping.some(m => isNaN(m.scale) || isNaN(m.offset))) {
+    toast('Scale and offset must be numbers.', 'error');
+    return;
+  }
+  const btn = document.getElementById('btn-approve-mapping');
+  const box = document.getElementById('mapping-result');
+  const post = dryRun => fetch(`${API}/schema/approve`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ csv_path: selectedDataset.filename, mapping,
+                           proposal_source: currentProposal?.source, dry_run: dryRun }),
+  }).then(r => r.json());
+  const showNotices = data => {
+    box.innerHTML =
+      (data.errors || []).map(e => `<div class="notice notice-error">✗ ${escapeHtml(e)}</div>`).join('') +
+      (data.warnings || []).map(w => `<div class="notice notice-warn">${escapeHtml(w)}</div>`).join('');
+  };
+
+  btn.disabled = true;
+  try {
+    let data;
+    if (!mappingWarningsSeen) {
+      data = await post(true);
+      showNotices(data);
+      if (data.errors?.length) {
+        toast('Mapping has errors — fix them and approve again.', 'error');
+        btn.disabled = false;
+        return;
+      }
+      if (data.warnings?.length) {
+        mappingWarningsSeen = true;
+        btn.textContent = '⚠ Approve anyway';
+        toast('Review the warnings below, then approve again to confirm.', 'info');
+        btn.disabled = false;
+        return;
+      }
+    }
+    data = await post(false);
+    showNotices(data);
+    if (data.saved) {
+      box.innerHTML = `<div class="notice notice-ok">✓ Mapping approved and saved. You can now train the model.</div>` + box.innerHTML;
+      selectedDataset.mapping_status = 'approved';
+      updateActionButtons();
+      toast('Mapping approved.', 'success');
+      loadDatasets();
+    } else {
+      toast('Mapping has errors — fix them and approve again.', 'error');
+    }
+    resetMappingConfirmation();
+  } catch (e) {
+    toast(`Network error: ${e.message}`, 'error');
+  }
+  btn.disabled = false;
 }
 
 function updateSelectedDisplay(name) {
@@ -185,7 +348,7 @@ async function trainModel() {
     return;
   }
 
-  showOverlay('Training XGBoost + Random Forest model…', 'This may take 1–2 minutes depending on dataset size.');
+  showOverlay('Training XGBoost model…', 'This may take 1–2 minutes depending on dataset size.');
   setModelStatus('training', 'Training…');
 
   try {
@@ -197,6 +360,12 @@ async function trainModel() {
     const data = await res.json();
     hideOverlay();
 
+    if (data.mapping_required) {
+      setModelStatus(modelLoaded ? 'ready' : 'idle', modelLoaded ? 'Previous model loaded' : 'No model loaded');
+      toast(data.error, 'error');
+      openMapping();
+      return;
+    }
     if (data.error) {
       toast(`Training failed: ${data.error}`, 'error');
       setModelStatus('error', 'Training failed');
@@ -204,7 +373,8 @@ async function trainModel() {
     }
 
     modelLoaded = true;
-    setModelStatus('ready', `Model ready — R² ${data.metrics?.ensemble?.r2_score ?? '—'}`);
+    checkModelStatus();   // refreshes form fields for the new model's features
+    setModelStatus('ready', `Model ready — R² ${data.metrics?.xgboost?.r2_score ?? '—'}`);
     showTrainResult(data);
     toast('Model trained successfully!', 'success');
   } catch (e) {
@@ -216,13 +386,18 @@ async function trainModel() {
 
 function showTrainResult(data) {
   const box = document.getElementById('train-result');
-  const ens = data.metrics?.ensemble || {};
+  const ens = data.metrics?.xgboost || {};
+  const rul = data.rul_source;
+  // Always surface estimated-RUL training so users ask the plant for real failure records.
+  const rulNotice = rul ? `<div class="notice ${rul.estimated ? 'notice-warn' : 'notice-ok'}">
+      ${rul.estimated ? '⚠ <strong>Estimated RUL.</strong> ' : ''}${escapeHtml(rul.message)}</div>` : '';
   box.classList.remove('hidden');
   box.innerHTML = `
     <div class="train-result-title">✓ Model Trained Successfully</div>
+    ${rulNotice}
     <div class="metrics-grid">
       <div class="metric-box">
-        <div class="metric-label">R² Score (Ensemble)</div>
+        <div class="metric-label">R² Score (held-out belts)</div>
         <div class="metric-value green">${ens.r2_score ?? '—'}</div>
       </div>
       <div class="metric-box">
@@ -291,28 +466,28 @@ async function addInspection() {
     return;
   }
 
-  const hour  = parseFloat(document.getElementById('insp-hour').value);
-  const load  = parseFloat(document.getElementById('insp-load').value);
-  const speed = parseFloat(document.getElementById('insp-speed').value);
-  const temp  = parseFloat(document.getElementById('insp-temp').value);
-  const vib   = parseFloat(document.getElementById('insp-vib').value);
-  const wear  = parseFloat(document.getElementById('insp-wear').value);
-  const elong = parseFloat(document.getElementById('insp-elong').value);
-  const crack = parseFloat(document.getElementById('insp-crack').value);
+  const hour = parseFloat(document.getElementById('insp-hour').value);
+  const inspRecord = { hour };
+  // Only send fields the current model uses (disabled inputs are not model features)
+  Object.entries(INSPECTION_INPUTS).forEach(([feat, id]) => {
+    const el = document.getElementById(id);
+    if (!el.disabled) inspRecord[feat] = parseFloat(el.value);
+  });
+  document.querySelectorAll('#extra-inputs input').forEach(el => {
+    inspRecord[el.dataset.feature] = parseFloat(el.value);
+  });
 
-  if ([hour, load, speed, temp, vib, wear, elong, crack].some(isNaN)) {
+  if (Object.values(inspRecord).some(isNaN)) {
     toast('Please fill in all inspection fields.', 'error');
     return;
   }
 
   // Validate degradation doesn't exceed failure thresholds
-  if (wear >= 100 || elong >= 4 || crack >= 50) {
+  const failed = Object.entries(inspRecord).some(([f, v]) =>
+    canonicalFields[f]?.failure_threshold && v >= canonicalFields[f].failure_threshold);
+  if (failed) {
     toast('⚠ Belt has reached failure threshold!', 'error');
   }
-
-  const inspRecord = { hour, load_pct: load, belt_speed_mps: speed,
-    temperature_c: temp, vibration_mms: vib,
-    wear_pct: wear, elongation_pct: elong, crack_length_mm: crack };
 
   // Prevent duplicate hours
   const existingIdx = inspections.findIndex(i => i.hour === hour);
@@ -376,7 +551,7 @@ function updateResults(data) {
   document.getElementById('confidence-bar').style.width = `${conf}%`;
 
   // Health
-  document.getElementById('health-score').textContent  = `${latest.health_score}%`;
+  document.getElementById('health-score').textContent  = latest.health_score === null ? '—' : `${latest.health_score}%`;
   document.getElementById('dominant-risk').textContent = latest.dominant_driver;
   document.getElementById('runtime-hrs').textContent   = latest.hour.toLocaleString();
   document.getElementById('insp-count-card').textContent = n;
@@ -384,14 +559,15 @@ function updateResults(data) {
 
   // Degradation gauges
   const deg = latest.degradation_state;
-  setGauge('gauge-wear-circle',  'gauge-wear-pct',  deg.wear_pct / 100);
-  setGauge('gauge-elong-circle', 'gauge-elong-pct', deg.elongation_pct / 4);
-  setGauge('gauge-crack-circle', 'gauge-crack-pct', deg.crack_length_mm / 50);
+  // null = degradation measure not in this model's data
+  setGauge('gauge-wear-circle',  'gauge-wear-pct',  deg.wear_pct === null ? null : deg.wear_pct / 100);
+  setGauge('gauge-elong-circle', 'gauge-elong-pct', deg.elongation_pct === null ? null : deg.elongation_pct / 4);
+  setGauge('gauge-crack-circle', 'gauge-crack-pct', deg.crack_length_mm === null ? null : deg.crack_length_mm / 50);
 
   // Threshold bars (inline inputs)
-  document.getElementById('wear-fill').style.width  = `${Math.min(deg.wear_pct, 100)}%`;
-  document.getElementById('elong-fill').style.width = `${Math.min(deg.elongation_pct / 4 * 100, 100)}%`;
-  document.getElementById('crack-fill').style.width = `${Math.min(deg.crack_length_mm / 50 * 100, 100)}%`;
+  document.getElementById('wear-fill').style.width  = `${Math.min(deg.wear_pct ?? 0, 100)}%`;
+  document.getElementById('elong-fill').style.width = `${Math.min((deg.elongation_pct ?? 0) / 4 * 100, 100)}%`;
+  document.getElementById('crack-fill').style.width = `${Math.min((deg.crack_length_mm ?? 0) / 50 * 100, 100)}%`;
 
   // Chart
   renderChart(history);
@@ -403,9 +579,14 @@ function updateResults(data) {
 // Gauge ring animation (SVG stroke-dashoffset trick)
 function setGauge(circleId, pctId, ratio) {
   const circumference = 213.6; // 2π×34
+  const circle = document.getElementById(circleId);
+  if (ratio === null) {
+    circle.style.strokeDashoffset = circumference;
+    document.getElementById(pctId).textContent = 'n/a';
+    return;
+  }
   ratio = Math.min(Math.max(ratio, 0), 1);
   const offset = circumference * (1 - ratio);
-  const circle = document.getElementById(circleId);
   circle.style.strokeDashoffset = offset;
   document.getElementById(pctId).textContent = `${Math.round(ratio * 100)}%`;
 }
@@ -519,13 +700,72 @@ function renderTable(history) {
       <td>${h.hour.toLocaleString()}</td>
       <td class="rul-cell">${h.rul_hours.toLocaleString()}</td>
       <td class="conf-cell">${h.confidence_pct}%</td>
-      <td class="health-cell">${h.health_score}%</td>
-      <td>${h.degradation_state.wear_pct}%</td>
-      <td>${h.degradation_state.elongation_pct}%</td>
-      <td>${h.degradation_state.crack_length_mm} mm</td>
+      <td class="health-cell">${h.health_score === null ? '—' : h.health_score + '%'}</td>
+      <td>${withUnit(h.degradation_state.wear_pct, '%')}</td>
+      <td>${withUnit(h.degradation_state.elongation_pct, '%')}</td>
+      <td>${withUnit(h.degradation_state.crack_length_mm, ' mm')}</td>
     `;
     tbody.appendChild(tr);
   });
+}
+
+// ── Model-driven form ──────────────────────────────────────────────────────
+// Fixed form inputs -> canonical feature. Any other feature the trained model uses
+// gets a generated input under "Additional Model Inputs".
+const BELT_INPUTS = {
+  rubber_hardness_shore_a: 'hardness',
+  belt_thickness_mm:       'thickness',
+  tensile_strength_kn_m:   'tensile',
+};
+const INSPECTION_INPUTS = {
+  load_pct:        'insp-load',
+  belt_speed_mps:  'insp-speed',
+  temperature_c:   'insp-temp',
+  vibration_mms:   'insp-vib',
+  wear_pct:        'insp-wear',
+  elongation_pct:  'insp-elong',
+  crack_length_mm: 'insp-crack',
+};
+
+function configureFormForModel(featureCols, featureStats) {
+  const used = new Set(featureCols);
+  Object.entries({ ...BELT_INPUTS, ...INSPECTION_INPUTS }).forEach(([feat, id]) => {
+    const el = document.getElementById(id);
+    const group = el.closest('.form-group');
+    el.disabled = !used.has(feat);
+    group.classList.toggle('unused', !used.has(feat));
+    group.title = used.has(feat) ? '' : 'Not used by the current model (not in its training data)';
+  });
+
+  const known = new Set(['hour', ...Object.keys(BELT_INPUTS), ...Object.keys(INSPECTION_INPUTS)]);
+  const extras = featureCols.filter(f => !known.has(f));
+  const box = document.getElementById('extra-inputs');
+  box.innerHTML = '';
+  extras.forEach(f => {
+    const spec  = canonicalFields[f];
+    const label = spec ? spec.label : f.replace(/^x_/, '').replace(/_/g, ' ');
+    const unit  = spec?.unit ? ` <span class="unit">(${escapeHtml(spec.unit)})</span>` : '';
+    const med   = featureStats[f]?.median ?? 0;
+    const div = document.createElement('div');
+    div.className = 'form-group';
+    div.innerHTML = `<label>${escapeHtml(label)}${unit}</label>
+      <input type="number" step="any" data-feature="${escapeHtml(f)}" value="${med}" />
+      <span class="hint">Training median: ${fmt(med)}</span>`;
+    box.appendChild(div);
+  });
+  document.getElementById('extra-inputs-card').classList.toggle('hidden', extras.length === 0);
+}
+
+function escapeHtml(v) {
+  return String(v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function fmt(n) {
+  return Number(n).toLocaleString(undefined, { maximumSignificantDigits: 4 });
+}
+
+function withUnit(v, unit) {
+  return v === null || v === undefined ? '—' : `${v}${unit}`;
 }
 
 // ── Slider sync ────────────────────────────────────────────────────────────
