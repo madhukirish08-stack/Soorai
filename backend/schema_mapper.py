@@ -13,14 +13,15 @@ Flow:
                           dataset name and column signature, so later uploads with
                           the same columns reuse it without another LLM call.
   4. apply_mapping()    - renames, unit-converts (canonical = raw*scale + offset).
-  5. derive_rul()       - uses measured RUL / failure hours when present, otherwise
-                          estimates RUL from degradation trends (flagged as estimated).
+  5. derive_rul()       - builds survival targets: measured RUL / failure hours / observed threshold
+                          crossings are events; belts that never ended are right-censored.
 """
 
 import os
 import re
 import json
 import hashlib
+import time
 import difflib
 import urllib.request
 import urllib.error
@@ -30,37 +31,18 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+import config  # noqa: F401  (loads .env before GEMINI_* is read)
+
 SCHEMA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "canonical_schema.json")
-ENV_PATH    = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
-
-
-def _load_dotenv(path: str = ENV_PATH) -> None:
-    """Minimal .env loader (KEY=VALUE lines). Real environment variables take precedence."""
-    if not os.path.exists(path):
-        return
-    with open(path, encoding="utf-8-sig") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, val = line.split("=", 1)
-            key = key.strip().removeprefix("export ").strip()
-            os.environ.setdefault(key, val.strip().strip('"').strip("'"))
-
-
-_load_dotenv()
 
 IGNORE = "__ignore__"   # drop the column
 EXTRA  = "__extra__"    # keep as an additional numeric feature with no canonical meaning
 EXTRA_PREFIX = "x_"
 
 GEMINI_MODEL    = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
+GEMINI_FALLBACK_MODELS = [m.strip() for m in os.environ.get(
+    "GEMINI_FALLBACK_MODELS", "gemini-3.7-flash,gemini-2.5-flash").split(",") if m.strip()]
 GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-
-# A belt is only extrapolated to its failure threshold if the predicted failure lies
-# within this multiple of its observed history; further out the estimate is noise.
-MAX_EXTRAPOLATION_FACTOR = 3.0
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Schema helpers
@@ -75,10 +57,12 @@ def fields_by_role(schema: Dict, *roles: str) -> List[str]:
     return [k for k, v in schema["fields"].items() if v["role"] in roles]
 
 
-def degradation_thresholds(columns, schema: Optional[Dict] = None) -> Dict[str, float]:
+def default_thresholds(columns, schema: Optional[Dict] = None) -> Dict[str, float]:
+    """Generic limits, ONLY for sanity-checking a mapping before a belt type is chosen.
+    Training and prediction always use the belt type's own limits."""
     schema = schema or load_canonical()
     return {
-        c: float(schema["fields"][c]["failure_threshold"])
+        c: float(schema["fields"][c]["default_failure_threshold"])
         for c in fields_by_role(schema, "degradation") if c in columns
     }
 
@@ -93,12 +77,11 @@ def column_signature(columns) -> str:
     return hashlib.sha1("|".join(norm).encode("utf-8")).hexdigest()[:16]
 
 
-def is_legacy_canonical(columns) -> bool:
-    """True when a CSV already follows the original synthetic-data contract
-    (every canonical feature + rul_hours). Such files train without a mapping step."""
-    schema = load_canonical()
-    required = fields_by_role(schema, "feature", "degradation", "time", "target")
-    return all(c in columns for c in required)
+def is_fully_canonical(columns) -> bool:
+    """True when every column already has a canonical name - nothing to map, so such
+    files can train without a mapping review."""
+    fields = load_canonical()["fields"]
+    return len(columns) > 0 and all(str(c) in fields for c in columns)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -141,7 +124,7 @@ def _build_prompt(schema: Dict, profile: List[Dict], taken: List[str]) -> str:
         k: {kk: v.get(kk) for kk in ("role", "label", "unit", "range", "description") if v.get(kk) is not None}
         for k, v in schema["fields"].items() if k not in taken
     }
-    return f"""You map columns of an industrial conveyor-belt maintenance dataset onto a canonical schema.
+    return f"""You map columns of an industrial power-transmission belt (V-belt, wedge, cogged, Poly-V) maintenance dataset onto a canonical schema.
 The result trains a Remaining-Useful-Life model, so a wrong mapping is worse than no mapping.
 
 CANONICAL FIELDS still available (name -> definition):
@@ -155,7 +138,9 @@ RULES
 - target "{EXTRA}": numeric sensor/measurement columns plausibly related to belt condition that have no canonical match.
 - target "{IGNORE}": free text, row numbers, constant columns, categorical labels, or anything you cannot map with reasonable confidence.
 - If the incoming unit differs from the canonical unit, give scale and offset so that canonical = raw * scale + offset
-  (e.g. Fahrenheit->Celsius scale=0.5556 offset=-17.7778; fraction 0-1 -> percent scale=100; metres->mm scale=1000).
+  (e.g. Fahrenheit->Celsius scale=0.5556 offset=-17.7778; fraction 0-1 -> percent scale=100; metres->mm scale=1000;
+  inches->mm scale=25.4).
+- Belt section / product codes (A, B, SPB, BX, Poly-F Plus, ...) map to "belt_type".
   Infer units from names AND value ranges. Otherwise scale=1, offset=0.
 - A column holding remaining life in DAYS maps to rul_hours with scale=24 (state the assumption).
 - confidence in [0,1]. If two canonical fields are plausible, pick the likelier one, give confidence <= 0.6 and say why.
@@ -175,11 +160,19 @@ def call_gemini(prompt: str, api_key: str, model: str = GEMINI_MODEL, timeout: i
         # Key goes in a header, never the URL, so it can't leak into proxy/access logs.
         headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
     )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"Gemini API error {e.code}: {e.read().decode('utf-8', 'replace')[:500]}")
+    # Gemini returns 429/503 under load ("high demand"); those are transient, so retry with backoff.
+    for attempt, wait in enumerate((0, 2, 5)):
+        time.sleep(wait)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as e:
+            if e.code not in (429, 500, 503) or attempt == 2:
+                raise RuntimeError(f"Gemini API error {e.code}: {e.read().decode('utf-8', 'replace')[:300]}")
+        except (urllib.error.URLError, TimeoutError) as e:
+            if attempt == 2:
+                raise RuntimeError(f"Gemini API unreachable: {e}")
     text = data["candidates"][0]["content"]["parts"][0]["text"]
     text = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.MULTILINE).strip()
     return json.loads(text)
@@ -193,7 +186,9 @@ def _fuzzy_guess(source: str, schema: Dict, taken: set) -> Tuple[str, float, str
             continue
         candidates[name] = name
         candidates[re.sub(r"[^a-z0-9]+", "_", spec["label"].lower()).strip("_")] = name
-    match = difflib.get_close_matches(norm, list(candidates), n=1, cutoff=0.6)
+    # Strict cutoff: a loose match ("Run Hrs" -> rul_hours) is worse than none. Unmatched
+    # columns are left for the engineer to map by hand.
+    match = difflib.get_close_matches(norm, list(candidates), n=1, cutoff=0.8)
     if match:
         return candidates[match[0]], 0.4, f"Fuzzy name match to '{match[0]}' (no LLM available) - verify unit"
     return IGNORE, 0.0, "No confident match (no LLM available)"
@@ -251,12 +246,23 @@ def propose_mapping(df: pd.DataFrame, mappings_dir: str) -> Dict:
         unresolved_profile = [p for p in profile if p["name"] in unresolved]
         llm_entries = None
         if api_key:
-            try:
-                raw = call_gemini(_build_prompt(schema, unresolved_profile, sorted(taken)), api_key)
-                llm_entries = _sanitize_llm(raw, unresolved, schema, taken)
-                source = "llm"
-            except Exception as e:
-                warnings.append(f"Gemini call failed ({e}); fell back to fuzzy name matching.")
+            prompt = _build_prompt(schema, unresolved_profile, sorted(taken))
+            failures = []
+            # Primary model first, then fallbacks: a single overloaded model must not
+            # silently degrade every proposal to name matching.
+            for model in [GEMINI_MODEL] + [m for m in GEMINI_FALLBACK_MODELS if m != GEMINI_MODEL]:
+                try:
+                    raw = call_gemini(prompt, api_key, model=model)
+                    llm_entries = _sanitize_llm(raw, unresolved, schema, set(taken))
+                    source = "llm"
+                    if failures:
+                        warnings.append(f"{GEMINI_MODEL} was unavailable; proposal made by {model}.")
+                    break
+                except Exception as e:
+                    failures.append(f"{model}: {str(e)[:120]}")
+            if llm_entries is None:
+                warnings.append("Gemini unavailable (" + "; ".join(failures) + "); fell back to name matching. "
+                                "Review every row carefully, or retry later.")
         else:
             warnings.append("GEMINI_API_KEY is not set; using fuzzy name matching. Review every row carefully.")
         if llm_entries is None:
@@ -287,8 +293,8 @@ def apply_mapping(raw: pd.DataFrame, mapping: List[Dict]) -> pd.DataFrame:
         name = extra_feature_name(src) if tgt == EXTRA else tgt
         role = "feature" if tgt == EXTRA else schema["fields"][tgt]["role"]
         col = raw[src]
-        if role == "id":
-            out[name] = col.astype(str)
+        if role in ("id", "belt_type"):
+            out[name] = col.astype(str).str.strip()
         elif role == "timestamp":
             out[name] = pd.to_datetime(col, errors="coerce")
         else:
@@ -300,7 +306,25 @@ def apply_mapping(raw: pd.DataFrame, mapping: List[Dict]) -> pd.DataFrame:
             origin = ts.groupby(out["belt_id"]).transform("min") if "belt_id" in out.columns else ts.min()
             out["hour"] = (ts - origin).dt.total_seconds() / 3600.0
         out = out.drop(columns=["timestamp"])
-    return out
+    return derive_features(out)
+
+
+def derive_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Calculated stress indicators. Used identically at training and prediction time.
+    Provided values are kept; only missing ones are computed."""
+    df = df.copy()
+
+    def missing(c):
+        return c not in df.columns or df[c].isna().all()
+
+    if missing("belt_speed_mps") and {"driver_pulley_dia_mm", "driver_rpm"} <= set(df.columns):
+        df["belt_speed_mps"] = np.pi * df["driver_pulley_dia_mm"] * df["driver_rpm"] / 60000.0
+    if missing("pulley_ratio") and {"driver_pulley_dia_mm", "driven_pulley_dia_mm"} <= set(df.columns):
+        df["pulley_ratio"] = df["driven_pulley_dia_mm"] / df["driver_pulley_dia_mm"]
+    if missing("bending_freq_hz") and {"belt_speed_mps", "pitch_length_mm"} <= set(df.columns):
+        pulleys = df["num_pulleys"] if "num_pulleys" in df.columns else 2
+        df["bending_freq_hz"] = df["belt_speed_mps"] / (df["pitch_length_mm"] / 1000.0) * pulleys
+    return df
 
 
 def identity_mapping(columns) -> List[Dict]:
@@ -339,7 +363,7 @@ def validate_mapping(raw: pd.DataFrame, mapping: List[Dict]) -> Tuple[List[str],
             continue
         name = extra_feature_name(src) if tgt == EXTRA else tgt
         role = "feature" if tgt == EXTRA else schema["fields"][tgt]["role"]
-        if role in ("id", "timestamp"):
+        if role in ("id", "timestamp", "belt_type"):
             continue
         raw_non_null = raw[src].notna()
         if raw_non_null.any():
@@ -356,7 +380,7 @@ def validate_mapping(raw: pd.DataFrame, mapping: List[Dict]) -> Tuple[List[str],
                 )
         # Range checks miss fraction-vs-percent errors (0.005 is a "valid" %), but a
         # degradation measure that never gets near its failure threshold almost always is one.
-        thr = schema["fields"].get(tgt, {}).get("failure_threshold")
+        thr = schema["fields"].get(tgt, {}).get("default_failure_threshold")
         if thr and df[name].notna().any() and df[name].quantile(0.99) < 0.05 * thr:
             warnings.append(
                 f"'{src}' → {tgt}: values never exceed 5% of the failure threshold ({thr:g} "
@@ -373,6 +397,8 @@ def validate_mapping(raw: pd.DataFrame, mapping: List[Dict]) -> Tuple[List[str],
                         "Idle time and pre-logging run time are not accounted for - an hour-meter column is preferred.")
 
     features = [c for c in df.columns if c in fields_by_role(schema, "feature", "degradation", "time") or c.startswith(EXTRA_PREFIX)]
+    if "belt_type" not in seen:
+        warnings.append("No belt-type column: you will choose the belt type for the whole file when training.")
     if not features:
         errors.append("No usable feature columns are mapped.")
 
@@ -431,88 +457,101 @@ def find_profile_by_signature(mappings_dir: str, signature: str) -> Optional[Dic
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RUL target
+# RUL target (survival data: events + right-censored belts)
 # ─────────────────────────────────────────────────────────────────────────────
 
 MEASURE_ADVICE = ("For accurate predictions, record the actual operating hour at which each belt failed or was "
                   "replaced (see docs/DATA_REQUIREMENTS.md).")
 
 
-def derive_rul(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict]:
-    """Return (rows with a 'rul_hours' target, info). Priority per belt:
-       measured RUL column > recorded failure hour > observed threshold crossing > linear extrapolation."""
+def derive_rul(df: pd.DataFrame, row_thresholds: Optional[pd.DataFrame] = None) -> Tuple[pd.DataFrame, Dict]:
+    """Return (rows with 'rul_hours' and 'rul_censored', info) as survival-analysis targets.
+
+    Per belt, in priority order:
+      measured RUL column > recorded failure hour > observed threshold crossing  -> EVENT: rul_hours is the true
+                                                                                    remaining life, rul_censored False
+      none of the above (still in service, or replaced before failing)           -> RIGHT-CENSORED at its last
+                                                                                    hour: rul_hours is only a LOWER
+                                                                                    bound (last_hour - hour), rul_censored True
+    # CUSTOM FIX (requested): belts are never extrapolated to an invented failure time any more - that
+    # produced fake targets. Do not reintroduce extrapolation; censoring is the correct treatment.
+
+    row_thresholds: failure limit per row and degradation column (each row's belt-type limits),
+    aligned to df.index. None -> schema default limits (mapping sanity checks only)."""
     schema = load_canonical()
     df = df.copy()
-
-    if "rul_hours" in df.columns and df["rul_hours"].notna().mean() >= 0.5:
-        df = df[df["rul_hours"].notna()]
-        return df, {"method": "measured", "estimated": False, "counts": {},
-                    "message": "Using the measured remaining-useful-life column from the dataset."}
-
-    if "hour" not in df.columns:
-        raise ValueError("Cannot generate RUL: map an operating-hours or timestamp column "
-                         "(or provide a remaining-useful-life column).")
-
-    thresholds = degradation_thresholds(df.columns, schema)
+    df["rul_censored"] = False
+    has_rul = "rul_hours" in df.columns and df["rul_hours"].notna().any()
     has_failure = "failure_hour" in df.columns
+    can_follow = "belt_id" in df.columns and "hour" in df.columns   # needed to see each belt's last hour
 
-    if "belt_id" not in df.columns:
-        if has_failure:
+    if not can_follow:
+        # No way to group rows into belts: only rows with a known target are usable (never censored).
+        if has_rul and df["rul_hours"].notna().mean() >= 0.5:
+            df = df[df["rul_hours"].notna()]
+            return df, {"method": "measured", "estimated": False, "counts": {"measured": int(len(df))},
+                        "message": "Using the measured remaining-useful-life column from the dataset."}
+        if has_failure and "hour" in df.columns:
             df = df[df["failure_hour"].notna() & df["hour"].notna()]
             df["rul_hours"] = (df["failure_hour"] - df["hour"]).clip(lower=0)
             return df, {"method": "failure_hour", "estimated": False, "counts": {"measured_failure_rows": int(len(df))},
                         "message": "RUL computed from recorded failure hours."}
-        raise ValueError("Cannot generate RUL: a belt/asset ID column is needed to follow each belt's degradation "
-                         "over time (or provide a remaining-useful-life / failure-hour column).")
+        raise ValueError("Cannot generate RUL: a belt/asset ID column and operating hours are needed to follow each "
+                         "belt over time (or provide a remaining-useful-life / failure-hour column).")
 
-    if not has_failure and not thresholds:
+    if "rul_hours" not in df.columns:
+        df["rul_hours"] = np.nan
+    deg_cols = [c for c in fields_by_role(schema, "degradation") if c in df.columns]
+    if row_thresholds is None:
+        defaults = default_thresholds(deg_cols, schema)
+        row_thresholds = pd.DataFrame({c: defaults[c] for c in deg_cols}, index=df.index)
+    thresholds = [c for c in deg_cols if c in row_thresholds.columns and row_thresholds[c].notna().any()]
+    if not has_rul and not has_failure and not thresholds:
         raise ValueError("Cannot generate RUL: the dataset has no remaining-life, failure-hour, or degradation "
                          "measurement (wear / elongation / crack) column.")
 
     ratio = None
     if thresholds:
-        ratio = pd.concat([df[c] / t for c, t in thresholds.items()], axis=1).max(axis=1, skipna=True)
+        ratio = pd.concat([df[c] / row_thresholds.loc[df.index, c] for c in thresholds], axis=1).max(axis=1, skipna=True)
 
-    counts = {"measured_failure": 0, "threshold_observed": 0, "extrapolated": 0, "dropped": 0}
+    counts = {"measured_rul": 0, "measured_failure": 0, "threshold_observed": 0, "censored": 0, "dropped": 0}
     parts = []
     for _, g in df[df["hour"].notna()].groupby("belt_id", sort=False):
         g = g.sort_values("hour")
-        fail_h, kind = None, None
-        if has_failure and g["failure_hour"].notna().any():
-            fail_h, kind = float(g["failure_hour"].dropna().iloc[0]), "measured_failure"
-        elif ratio is not None:
-            d = ratio.loc[g.index]
-            crossed = g.loc[d >= 1.0, "hour"]
-            if len(crossed):
-                fail_h, kind = float(crossed.iloc[0]), "threshold_observed"
+        if g["rul_hours"].notna().any():
+            g, kind = g[g["rul_hours"].notna()].copy(), "measured_rul"
+        else:
+            fail_h, kind = None, None
+            if has_failure and g["failure_hour"].notna().any():
+                fail_h, kind = float(g["failure_hour"].dropna().iloc[0]), "measured_failure"
+            elif ratio is not None:
+                crossed = g.loc[ratio.loc[g.index] >= 1.0, "hour"]
+                if len(crossed):
+                    fail_h, kind = float(crossed.iloc[0]), "threshold_observed"
+            if fail_h is not None:
+                g = g[g["hour"] <= fail_h].copy()
+                g["rul_hours"] = fail_h - g["hour"]
             else:
-                valid = d.notna()
-                h, y = g.loc[valid, "hour"].to_numpy(float), d[valid].to_numpy(float)
-                if len(h) >= 3 and np.ptp(h) > 0:
-                    slope, intercept = np.polyfit(h, y, 1)
-                    if slope > 0:
-                        cand = max((1.0 - intercept) / slope, h.max())
-                        if cand <= h.max() + MAX_EXTRAPOLATION_FACTOR * np.ptp(h):
-                            fail_h, kind = float(cand), "extrapolated"
-        if fail_h is None:
+                # Censored: still running / replaced early. A row at the last hour says nothing (lower bound 0).
+                kind, g = "censored", g.copy()
+                g["rul_hours"] = g["hour"].max() - g["hour"]
+                g["rul_censored"] = True
+                g = g[g["rul_hours"] > 0]
+        if g.empty:
             counts["dropped"] += 1
             continue
-        g = g[g["hour"] <= fail_h].copy()
-        g["rul_hours"] = fail_h - g["hour"]
         counts[kind] += 1
         parts.append(g)
 
     if not parts:
-        raise ValueError(f"Cannot generate RUL: no belt has a recorded failure, a threshold crossing, or a "
-                         f"rising degradation trend to extrapolate ({counts['dropped']} belts checked).")
-
-    estimated = counts["threshold_observed"] + counts["extrapolated"] > 0
-    thr_txt = ", ".join(f"{schema['fields'][c]['label'].lower()} {t:g} {schema['fields'][c]['unit']}" for c, t in thresholds.items())
+        raise ValueError(f"Cannot generate RUL: no belt has usable inspections ({counts['dropped']} belts checked).")
+    out = pd.concat(parts)
+    estimated = counts["threshold_observed"] > 0
+    thr_txt = "each belt type's " + ", ".join(schema["fields"][c]["label"].lower() for c in thresholds) + " limit"
+    n_events = counts["measured_rul"] + counts["measured_failure"] + counts["threshold_observed"]
+    message = (f"{n_events} belts with a known end of life, {counts['censored']} still-running or replaced-early belts "
+               f"(right-censored: they count as 'lasted at least this long', not as failures), {counts['dropped']} skipped.")
     if estimated:
-        message = (f"RUL was ESTIMATED, not measured: {counts['measured_failure']} belts with recorded failures, "
-                   f"{counts['threshold_observed']} belts that crossed an assumed failure threshold ({thr_txt}), "
-                   f"{counts['extrapolated']} belts extrapolated from their degradation trend, "
-                   f"{counts['dropped']} belts skipped (no usable trend). {MEASURE_ADVICE}")
-    else:
-        message = f"RUL computed from recorded failure hours for {counts['measured_failure']} belts ({counts['dropped']} skipped)."
-    return pd.concat(parts), {"method": "derived", "estimated": estimated, "counts": counts, "message": message}
+        message = (f"Failure time for {counts['threshold_observed']} belts was ESTIMATED from an assumed threshold "
+                   f"({thr_txt}), not recorded. " + message + " " + MEASURE_ADVICE)
+    return out, {"method": "survival", "estimated": estimated, "counts": counts, "message": message}

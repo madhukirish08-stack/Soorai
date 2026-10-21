@@ -1,0 +1,8 @@
+# Runtime (tested with Python 3.13; requires >= 3.10)
+fastapi==0.115.12
+uvicorn==0.34.2
+pydantic==2.14.1
+python-multipart==0.0.20
+xgboost==3.1.1
+pandas==2.2.3
+numpy==2.2.6

@@ -1,441 +1,614 @@
 """
-Belt RUL Prediction API - v2
-=============================
-Clean FastAPI backend built around the belt_rul_training_data.csv dataset.
+Belt RUL API
+============
+FastAPI backend + static frontend for one client company (engineer / planner roles).
 
-Endpoints:
-  GET  /metadata              - Model info and feature stats
-  GET  /datasets              - List available CSV datasets in data/ folder
-  POST /upload-dataset        - Upload a new CSV dataset
-  POST /train                 - Train (or retrain) on the selected dataset
-  POST /predict               - Predict RUL with confidence from inspection readings
-  POST /generate-data         - Run training_data_5_oct.py to generate fresh data
-  GET  /schema                - Canonical schema the model is trained on
-  POST /schema/propose        - LLM (Gemini) column-mapping proposal for a dataset
-  POST /schema/approve        - Validate + save a human-approved column mapping
+  /api/auth/*         login, logout, current user
+  /api/belt-types     belt-type profiles with their own failure limits   (edit: engineer)
+  /api/belts          fleet, inspections, recorded failures/replacements (engineer + planner)
+  /api/datasets       client datasets + column mapping review            (engineer)
+  /api/models         model versions: train, activate, compare, delete   (engineer)
+  /api/users          user accounts                                      (engineer)
+  /api/dev/*          synthetic data generation                          (engineer, DEV_MODE only)
+
+Run: python backend/api.py   (first user: python backend/manage.py create-user ...)
 """
 
-import os
-import sys
-import json
-import asyncio
 import io
-import joblib
-import numpy as np
-import pandas as pd
-from typing import Dict, Any, Optional
-from fastapi import FastAPI, Request, UploadFile, File
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse, RedirectResponse
-import traceback
+import json
+import logging
+import os
+import re
+import subprocess
+import sys
+from contextlib import asynccontextmanager
+from typing import Dict, List, Literal, Optional
 
-# Add v2 backend to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import pandas as pd
+from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+
+import auth
+import model_registry as reg
 import schema_mapper as sm
+from config import (COOKIE_SECURE, DATASETS_DIR, DEV_MODE, FRONTEND_DIR, GENERATOR_SCRIPT,
+                    MAPPINGS_DIR, MAX_UPLOAD_MB, SESSION_HOURS)
+from db import BELT_FAMILIES, get_conn, init_db, list_belt_types, match_belt_type, now_iso, row_to_dict
 
-app = FastAPI(title="Belt RUL Prediction API v2")
+log = logging.getLogger("belt_rul")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ── Path setup ────────────────────────────────────────────────────────────────
-BASE_DIR    = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))   # v2/
-PARENT_DIR  = os.path.abspath(os.path.join(BASE_DIR, ".."))                    # project root
-MODELS_DIR  = os.path.join(BASE_DIR, "models_v2") if os.path.exists(os.path.join(BASE_DIR, "models_v2")) else os.path.join(PARENT_DIR, "models_v2")
-FRONTEND_DIR= os.path.join(BASE_DIR, "frontend")
-DATA_DIR    = os.path.join(BASE_DIR, "data") if os.path.exists(os.path.join(BASE_DIR, "data")) else os.path.join(PARENT_DIR, "data")
-TRAINING_SCRIPT = (
-    os.path.join(BASE_DIR, "training", "training_data_5_oct.py")
-    if os.path.exists(os.path.join(BASE_DIR, "training", "training_data_5_oct.py"))
-    else os.path.join(PARENT_DIR, "training", "training_data_5_oct.py")
-)
-
-MAPPINGS_DIR = os.path.join(BASE_DIR, "mappings")
-
-os.makedirs(MODELS_DIR, exist_ok=True)
-os.makedirs(DATA_DIR,   exist_ok=True)
-
-# ── Serve frontend ─────────────────────────────────────────────────────────
-app.mount("/ui", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
-
-@app.get("/", include_in_schema=False)
-async def root():
-    return RedirectResponse(url="/ui")
-
-# ── Global model state ────────────────────────────────────────────────────────
-MODEL_PAYLOAD: Optional[Dict] = None
-
-# Confidence grows with number of inspections performed
-def compute_confidence(n_inspections: int, r2: float) -> float:
-    """
-    Confidence starts low (first reading = ~40%) and grows toward model R2
-    as more inspection data points are submitted.
-    Caps out at 97%.
-    """
-    base   = 40.0
-    ceiling = min(r2 * 100, 97.0)
-    growth  = 1.0 - float(np.exp(-0.35 * (n_inspections - 1)))
-    conf    = base + (ceiling - base) * growth
-    return float(round(min(conf, 97.0), 1))
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    yield
 
 
-def load_model():
-    global MODEL_PAYLOAD
-    path = os.path.join(MODELS_DIR, "rul_model.pkl")
-    if os.path.exists(path):
-        MODEL_PAYLOAD = joblib.load(path)
-        print(f"[startup] Loaded model from {path}")
-    else:
-        print("[startup] No pre-trained model found. Use /train after selecting a dataset.")
+# API docs expose every endpoint - only in development.
+app = FastAPI(title="Belt RUL API", lifespan=lifespan, docs_url="/docs" if DEV_MODE else None,
+              redoc_url=None, openapi_url="/openapi.json" if DEV_MODE else None)
+# No CORS middleware on purpose: the frontend is served from this same origin.
 
 
-@app.on_event("startup")
-async def startup_event():
-    load_model()
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "same-origin"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; "
+        "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'")
+    return response
+
+
+@app.exception_handler(Exception)
+async def unhandled(request: Request, exc: Exception):
+    # Never leak tracebacks to the client; log them server-side.
+    log.exception("Unhandled error on %s", request.url.path)
+    return JSONResponse(status_code=500, content={"detail": "Internal server error."})
+
+
+@app.exception_handler(reg.TrainingError)
+async def training_error(request: Request, exc: reg.TrainingError):
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
+def bad_request(msg: str):
+    raise HTTPException(status_code=400, detail=msg)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Dataset endpoints
+# Auth
 # ─────────────────────────────────────────────────────────────────────────────
 
-def resolve_dataset(csv_path: str) -> str:
-    """Datasets are always resolved inside DATA_DIR (blocks path traversal via csv_path)."""
-    return os.path.join(DATA_DIR, os.path.basename(csv_path or ""))
+class LoginBody(BaseModel):
+    username: str = Field(min_length=1, max_length=100)
+    password: str = Field(min_length=1, max_length=200)
 
 
-def mapping_status(filename: str, columns) -> str:
-    if sm.load_mapping(MAPPINGS_DIR, filename, columns):
-        return "approved"
-    if sm.is_legacy_canonical(columns):
-        return "not_needed"
-    return "required"
+@app.post("/api/auth/login")
+def login(body: LoginBody, request: Request, response: Response):
+    ip = request.client.host if request.client else "unknown"
+    auth.check_rate_limit(ip)
+    user = auth.authenticate(body.username, body.password)
+    if user is None:
+        auth.record_failure(ip)
+        raise HTTPException(status_code=401, detail="Wrong username or password.")
+    token = auth.create_session(user["id"])
+    response.set_cookie(auth.COOKIE_NAME, token, max_age=int(SESSION_HOURS * 3600), httponly=True,
+                        secure=COOKIE_SECURE, samesite="strict", path="/")
+    return {"id": user["id"], "username": user["username"], "role": user["role"], "dev_mode": DEV_MODE}
 
 
-@app.get("/datasets")
-async def list_datasets():
-    """List all CSV datasets available in the data/ folder."""
-    csvs = []
-    if os.path.isdir(DATA_DIR):
-        for f in os.listdir(DATA_DIR):
-            if f.lower().endswith(".csv"):
-                full = os.path.join(DATA_DIR, f)
-                size_mb = round(os.path.getsize(full) / 1_048_576, 2)
-                # Peek at row/column count
-                try:
-                    df_peek = pd.read_csv(full, nrows=3)
-                    cols = list(df_peek.columns)
-                except Exception:
-                    cols = []
-                csvs.append({
-                    "filename": f,
-                    "path": full,
-                    "size_mb": size_mb,
-                    "columns": cols,
-                    "mapping_status": mapping_status(f, cols),
-                })
-    return {"datasets": csvs, "data_dir": DATA_DIR}
+@app.post("/api/auth/logout")
+def logout(request: Request, response: Response):
+    token = request.cookies.get(auth.COOKIE_NAME)
+    if token:
+        auth.delete_session(token)
+    response.delete_cookie(auth.COOKIE_NAME, path="/")
+    return {"ok": True}
 
 
-@app.post("/upload-dataset")
-async def upload_dataset(file: UploadFile = File(...)):
-    """Upload a new CSV dataset to the data/ folder."""
-    if not file.filename.lower().endswith(".csv"):
-        return JSONResponse(status_code=400, content={"error": "Only CSV files accepted."})
-    dest = os.path.join(DATA_DIR, file.filename)
-    contents = await file.read()
-    with open(dest, "wb") as f:
-        f.write(contents)
-    # Quick validation
+@app.get("/api/auth/me")
+def me(user: dict = Depends(auth.current_user)):
+    return {**user, "dev_mode": DEV_MODE}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Users (engineer)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class UserBody(BaseModel):
+    username: str = Field(min_length=3, max_length=50, pattern=r"^[A-Za-z0-9_.@-]+$")
+    password: str = Field(min_length=auth.MIN_PASSWORD_LENGTH, max_length=200)
+    role: str = Field(pattern="^(engineer|planner)$")
+
+
+@app.get("/api/users")
+def list_users(user: dict = Depends(auth.require_engineer)):
+    with get_conn() as conn:
+        rows = conn.execute("SELECT id, username, role, active, created_at FROM users ORDER BY id").fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/users")
+def add_user(body: UserBody, user: dict = Depends(auth.require_engineer)):
     try:
-        df = pd.read_csv(io.BytesIO(contents))
-        row_count = len(df)
-        columns = list(df.columns)
+        return {"id": auth.create_user(body.username, body.password, body.role)}
     except Exception as e:
-        return JSONResponse(status_code=400, content={"error": f"Could not parse CSV: {e}"})
-    return {
-        "success": True,
-        "filename": file.filename,
-        "rows": row_count,
-        "columns": columns,
-        "path": dest,
-    }
+        bad_request("Username already exists." if "UNIQUE" in str(e) else str(e))
 
 
-@app.post("/generate-data")
-async def generate_data(request: Request):
-    """
-    Run training_data_5_oct.py to generate a fresh synthetic dataset.
-    Body params (all optional): belts, max_hours, step, seed
-    """
-    body = await request.json()
-    belts     = int(body.get("belts",     300))
-    max_hours = int(body.get("max_hours", 20000))
-    step      = int(body.get("step",      100))
-    seed      = int(body.get("seed",      42))
-    out_name  = body.get("output_name",   "belt_rul_training_data.csv")
-    out_path  = os.path.join(DATA_DIR, out_name)
-
-    if not os.path.exists(TRAINING_SCRIPT):
-        return JSONResponse(status_code=404,
-            content={"error": f"training_data_5_oct.py not found at {TRAINING_SCRIPT}"})
-
-    cmd = (
-        f'python "{TRAINING_SCRIPT}" '
-        f'--belts {belts} --max-hours {max_hours} --step {step} '
-        f'--seed {seed} --output "{out_path}"'
-    )
-    proc = await asyncio.create_subprocess_shell(
-        cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        return JSONResponse(status_code=500, content={
-            "error": "Data generation failed.",
-            "stderr": stderr.decode()
-        })
-    return {
-        "success": True,
-        "output_path": out_path,
-        "log": stdout.decode(),
-    }
+@app.put("/api/users/{user_id}/active")
+def set_user_active(user_id: int, body: Dict[str, bool], user: dict = Depends(auth.require_engineer)):
+    if user_id == user["id"]:
+        bad_request("You cannot deactivate your own account.")
+    with get_conn() as conn:
+        conn.execute("UPDATE users SET active = ? WHERE id = ?", (1 if body.get("active") else 0, user_id))
+        if not body.get("active"):
+            conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+    return {"ok": True}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Training endpoint
+# Schema & belt types
 # ─────────────────────────────────────────────────────────────────────────────
 
-@app.post("/train")
-async def train_model(request: Request):
-    """Train on the specified CSV dataset."""
-    global MODEL_PAYLOAD
-    body    = await request.json()
-    csv_path = resolve_dataset(body.get("csv_path", "belt_rul_training_data.csv"))
-
-    if not os.path.exists(csv_path):
-        return JSONResponse(status_code=404,
-            content={"error": f"Dataset not found: {csv_path}"})
-
-    columns = list(pd.read_csv(csv_path, nrows=0).columns)
-    saved = sm.load_mapping(MAPPINGS_DIR, csv_path, columns)
-    # Human-in-the-loop gate (user requirement): a dataset whose columns are not already
-    # canonical must have a human-APPROVED mapping. Do not relax this to auto-apply LLM output.
-    if saved is None and not sm.is_legacy_canonical(columns):
-        return JSONResponse(status_code=409, content={
-            "error": "This dataset's columns must be mapped and approved before training.",
-            "mapping_required": True,
-        })
-
-    try:
-        # Dynamically import to avoid circular import issues
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from train_model import train
-        payload = train(csv_path, MODELS_DIR, saved["mapping"] if saved else None)
-        MODEL_PAYLOAD = payload
-        return {
-            "success": True,
-            "metrics": payload["metrics"],
-            "feature_importance": payload["feature_importance"],
-            "feature_cols": payload["feature_cols"],
-            "rul_source": payload["rul_source"],
-            "training_rows": payload["training_rows"],
-        }
-    except Exception as e:
-        return JSONResponse(status_code=500, content={
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        })
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Schema mapping endpoints (LLM proposes, human approves)
-# ─────────────────────────────────────────────────────────────────────────────
-
-@app.get("/schema")
-async def get_schema():
+@app.get("/api/schema")
+def get_schema(user: dict = Depends(auth.current_user)):
     return sm.load_canonical()
 
 
-@app.post("/schema/propose")
-def propose_schema(body: Dict[str, Any]):
-    """Sync def -> FastAPI runs it in a worker thread, so the Gemini call doesn't block the loop."""
-    csv_path = resolve_dataset(body.get("csv_path"))
-    if not os.path.exists(csv_path):
-        return JSONResponse(status_code=404, content={"error": f"Dataset not found: {csv_path}"})
+DEGRADATION_FIELDS = sm.fields_by_role(sm.load_canonical(), "degradation")
+
+
+class BeltTypeBody(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    family: str
+    aliases: List[str] = []
+    cord_material: str = Field(default="", max_length=80)
+    notes: str = Field(default="", max_length=1000)
+    thresholds: Dict[str, float]
+    thresholds_confirmed: bool = False
+
+
+def _validate_type(body: BeltTypeBody) -> dict:
+    if body.family not in BELT_FAMILIES:
+        bad_request(f"family must be one of {BELT_FAMILIES}")
+    thr = {k: float(v) for k, v in body.thresholds.items() if k in DEGRADATION_FIELDS and v is not None}
+    if not thr or any(v <= 0 for v in thr.values()):
+        bad_request("Give at least one positive failure limit (elongation, wear or crack depth).")
+    return thr
+
+
+@app.get("/api/belt-types")
+def get_belt_types(user: dict = Depends(auth.current_user)):
+    active = reg.active_model_ids()
+    with get_conn() as conn:
+        types = list_belt_types(conn)
+        counts = dict(conn.execute("SELECT belt_type_id, COUNT(*) FROM belts GROUP BY belt_type_id").fetchall())
+    for t in types:
+        t["active_model_id"] = active.get(t["id"])
+        t["belt_count"] = counts.get(t["id"], 0)
+    return {"types": types, "families": BELT_FAMILIES, "degradation_fields": DEGRADATION_FIELDS}
+
+
+@app.post("/api/belt-types")
+def create_belt_type(body: BeltTypeBody, user: dict = Depends(auth.require_engineer)):
+    thr = _validate_type(body)
     try:
-        raw = pd.read_csv(csv_path)
-        saved = sm.load_mapping(MAPPINGS_DIR, csv_path, raw.columns)
-        if saved:
-            proposal = {"source": "approved", "mapping": saved["mapping"],
-                        "profile": sm.profile_dataframe(raw), "warnings": []}
-        else:
-            proposal = sm.propose_mapping(raw, MAPPINGS_DIR)
-        proposal["already_approved"] = saved is not None
-        proposal["canonical_fields"] = sm.load_canonical()["fields"]
-        return proposal
+        with get_conn() as conn:
+            new_id = conn.execute(
+                "INSERT INTO belt_types (name, family, aliases, cord_material, notes, thresholds_json, "
+                "thresholds_confirmed, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (body.name.strip(), body.family, ", ".join(a.strip() for a in body.aliases if a.strip()),
+                 body.cord_material, body.notes, json.dumps(thr), int(body.thresholds_confirmed), now_iso(), now_iso()),
+            ).lastrowid
     except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e), "traceback": traceback.format_exc()})
+        bad_request("A belt type with this name already exists." if "UNIQUE" in str(e) else str(e))
+    return {"id": new_id}
 
 
-@app.post("/schema/approve")
-def approve_schema(body: Dict[str, Any]):
-    csv_path = resolve_dataset(body.get("csv_path"))
-    mapping  = body.get("mapping") or []
-    if not os.path.exists(csv_path):
-        return JSONResponse(status_code=404, content={"error": f"Dataset not found: {csv_path}"})
-    raw = pd.read_csv(csv_path)
-    errors, warnings, rul_info = sm.validate_mapping(raw, mapping)
+@app.put("/api/belt-types/{type_id}")
+def update_belt_type(type_id: int, body: BeltTypeBody, user: dict = Depends(auth.require_engineer)):
+    thr = _validate_type(body)
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE belt_types SET name=?, family=?, aliases=?, cord_material=?, notes=?, thresholds_json=?, "
+            "thresholds_confirmed=?, updated_at=? WHERE id=?",
+            (body.name.strip(), body.family, ", ".join(a.strip() for a in body.aliases if a.strip()),
+             body.cord_material, body.notes, json.dumps(thr), int(body.thresholds_confirmed), now_iso(), type_id))
+    if cur.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Belt type not found.")
+    return {"ok": True}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Belts & inspections (engineer + planner)
+# ─────────────────────────────────────────────────────────────────────────────
+
+STATIC_FIELDS = [k for k, v in sm.load_canonical()["fields"].items() if v.get("group") == "static"]
+
+
+class BeltBody(BaseModel):
+    tag: str = Field(min_length=1, max_length=60)
+    belt_type_id: int
+    location: str = Field(default="", max_length=120)
+    installed_on: Optional[str] = Field(default=None, max_length=10)
+    static: Dict[str, Optional[float]] = {}
+
+
+class InspectionBody(BaseModel):
+    hour: float = Field(ge=0, le=200000)
+    readings: Dict[str, Optional[float]]
+
+
+class EndOfLifeBody(BaseModel):
+    status: str = Field(pattern="^(failed|replaced|in_service)$")
+    hour: Optional[float] = Field(default=None, ge=0, le=200000)
+    reason: str = Field(default="", max_length=300)
+
+
+def _clean_static(static: Dict) -> Dict:
+    return {k: float(v) for k, v in static.items() if k in STATIC_FIELDS and v is not None}
+
+
+def _belt(conn, belt_id: int) -> dict:
+    row = conn.execute("SELECT * FROM belts WHERE id = ?", (belt_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Belt not found.")
+    return row_to_dict(row)
+
+
+def _inspections(conn, belt_id: int) -> List[dict]:
+    rows = conn.execute("SELECT i.*, u.username AS created_by_name FROM inspections i "
+                        "LEFT JOIN users u ON u.id = i.created_by WHERE belt_id = ? ORDER BY hour", (belt_id,)).fetchall()
+    return [row_to_dict(r) for r in rows]
+
+
+def _type_map(conn) -> Dict[int, dict]:
+    return {t["id"]: t for t in list_belt_types(conn)}
+
+
+@app.get("/api/belts")
+def list_belts(user: dict = Depends(auth.current_user)):
+    active = reg.active_model_ids()
+    with get_conn() as conn:
+        types = _type_map(conn)
+        belts = [row_to_dict(r) for r in conn.execute("SELECT * FROM belts ORDER BY tag").fetchall()]
+        latest = {r["belt_id"]: row_to_dict(r) for r in conn.execute(
+            "SELECT i.* FROM inspections i JOIN (SELECT belt_id, MAX(hour) h FROM inspections GROUP BY belt_id) x "
+            "ON x.belt_id = i.belt_id AND x.h = i.hour").fetchall()}
+        n_insp = dict(conn.execute("SELECT belt_id, COUNT(*) FROM inspections GROUP BY belt_id").fetchall())
+    out = []
+    for b in belts:
+        t = types[b["belt_type_id"]]
+        last = latest.get(b["id"])
+        pred = None
+        if last and b["status"] == "in_service":
+            # Live with the CURRENT active model (it may have changed since the inspection).
+            pred = reg.predict_inspections(b, t, [{"hour": last["hour"], "readings": last["readings"]}],
+                                           active.get(b["belt_type_id"]))[0]
+        out.append({**b, "belt_type_name": t["name"], "inspection_count": n_insp.get(b["id"], 0),
+                    "last_hour": last["hour"] if last else None, "last_inspected_at": last["created_at"] if last else None,
+                    "prediction": pred, "has_active_model": b["belt_type_id"] in active})
+    return out
+
+
+@app.post("/api/belts")
+def create_belt(body: BeltBody, user: dict = Depends(auth.current_user)):
+    with get_conn() as conn:
+        if body.belt_type_id not in _type_map(conn):
+            bad_request("Unknown belt type.")
+        try:
+            new_id = conn.execute(
+                "INSERT INTO belts (tag, belt_type_id, location, installed_on, static_json, created_at, created_by) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (body.tag.strip(), body.belt_type_id, body.location.strip(), body.installed_on,
+                 json.dumps(_clean_static(body.static)), now_iso(), user["id"])).lastrowid
+        except Exception as e:
+            bad_request("A belt with this tag already exists." if "UNIQUE" in str(e) else str(e))
+    return {"id": new_id}
+
+
+@app.put("/api/belts/{belt_id}")
+def update_belt(belt_id: int, body: BeltBody, user: dict = Depends(auth.current_user)):
+    with get_conn() as conn:
+        _belt(conn, belt_id)
+        if body.belt_type_id not in _type_map(conn):
+            bad_request("Unknown belt type.")
+        conn.execute("UPDATE belts SET tag=?, belt_type_id=?, location=?, installed_on=?, static_json=? WHERE id=?",
+                     (body.tag.strip(), body.belt_type_id, body.location.strip(), body.installed_on,
+                      json.dumps(_clean_static(body.static)), belt_id))
+    return {"ok": True}
+
+
+@app.get("/api/belts/{belt_id}")
+def belt_detail(belt_id: int, user: dict = Depends(auth.current_user)):
+    active = reg.active_model_ids()
+    with get_conn() as conn:
+        belt = _belt(conn, belt_id)
+        btype = _type_map(conn)[belt["belt_type_id"]]
+        insps = _inspections(conn, belt_id)
+    model_id = active.get(belt["belt_type_id"])
+    preds = reg.predict_inspections(belt, btype, [{"hour": i["hour"], "readings": i["readings"]} for i in insps], model_id)
+    model = reg.get_model(model_id) if model_id else None
+    return {
+        "belt": belt, "belt_type": btype, "inspections": insps, "predictions": preds,
+        "model": {"id": model["id"], "feature_cols": model["info"]["feature_cols"],
+                  "feature_stats": model["info"]["feature_stats"], "metrics": model["info"]["metrics"],
+                  "rul_estimated": model["info"]["rul_estimated"]} if model else None,
+    }
+
+
+@app.post("/api/belts/{belt_id}/inspections")
+def add_inspection(belt_id: int, body: InspectionBody, user: dict = Depends(auth.current_user)):
+    fields = sm.load_canonical()["fields"]
+    readings = {k: float(v) for k, v in body.readings.items()
+                if v is not None and (k in fields or k.startswith(sm.EXTRA_PREFIX))}
+    active = reg.active_model_ids()
+    with get_conn() as conn:
+        belt = _belt(conn, belt_id)
+        if belt["status"] != "in_service":
+            bad_request("This belt is no longer in service.")
+        btype = _type_map(conn)[belt["belt_type_id"]]
+        model_id = active.get(belt["belt_type_id"])
+        prior = [{"hour": i["hour"], "readings": i["readings"]} for i in _inspections(conn, belt_id) if i["hour"] != body.hour]
+        history = sorted(prior + [{"hour": body.hour, "readings": readings}], key=lambda i: i["hour"])
+        pred = reg.predict_inspections(belt, btype, history, model_id)[[h["hour"] for h in history].index(body.hour)]
+        # Store the prediction made at inspection time (model version included) - this is the
+        # audit trail for later comparing predictions with the belt's actual failure.
+        conn.execute(
+            "INSERT INTO inspections (belt_id, hour, readings_json, predicted_rul, health_score, model_id, created_at, created_by) "
+            "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(belt_id, hour) DO UPDATE SET readings_json=excluded.readings_json, "
+            "predicted_rul=excluded.predicted_rul, health_score=excluded.health_score, model_id=excluded.model_id, "
+            "created_at=excluded.created_at, created_by=excluded.created_by",
+            (belt_id, body.hour, json.dumps(readings), pred["rul_hours"], pred["health_score"], model_id, now_iso(), user["id"]))
+    return belt_detail(belt_id, user)
+
+
+@app.delete("/api/belts/{belt_id}/inspections/{inspection_id}")
+def delete_inspection(belt_id: int, inspection_id: int, user: dict = Depends(auth.current_user)):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM inspections WHERE id = ? AND belt_id = ?", (inspection_id, belt_id))
+    return belt_detail(belt_id, user)
+
+
+@app.put("/api/belts/{belt_id}/end-of-life")
+def end_of_life(belt_id: int, body: EndOfLifeBody, user: dict = Depends(auth.current_user)):
+    if body.status != "in_service" and body.hour is None:
+        bad_request("Enter the operating hour at which the belt failed / was replaced.")
+    with get_conn() as conn:
+        _belt(conn, belt_id)
+        conn.execute("UPDATE belts SET status=?, end_hour=?, end_reason=? WHERE id=?",
+                     (body.status, None if body.status == "in_service" else body.hour,
+                      None if body.status == "in_service" else body.reason, belt_id))
+    return belt_detail(belt_id, user)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Datasets & column mapping (engineer)
+# ─────────────────────────────────────────────────────────────────────────────
+
+SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def dataset_path(name: Optional[str]) -> str:
+    """Datasets always resolve inside DATASETS_DIR (blocks path traversal)."""
+    path = os.path.join(DATASETS_DIR, os.path.basename(name or ""))
+    if not name or not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="Dataset not found.")
+    return path
+
+
+def _dataset_summary(fn: str) -> dict:
+    full = os.path.join(DATASETS_DIR, fn)
+    try:
+        cols = list(pd.read_csv(full, nrows=0).columns)
+    except Exception:
+        cols = []
+    saved = sm.load_mapping(MAPPINGS_DIR, fn, cols)
+    mapping = saved["mapping"] if saved else (sm.identity_mapping(cols) if sm.is_fully_canonical(cols) else None)
+    return {
+        "filename": fn, "size_mb": round(os.path.getsize(full) / 1_048_576, 2), "columns": cols,
+        "mapping_status": "approved" if saved else "not_needed" if mapping else "required",
+        "has_belt_type_column": bool(mapping and any(m["target"] == "belt_type" for m in mapping)),
+    }
+
+
+@app.get("/api/datasets")
+def list_datasets(user: dict = Depends(auth.require_engineer)):
+    files = sorted(f for f in os.listdir(DATASETS_DIR) if f.lower().endswith(".csv"))
+    return [_dataset_summary(f) for f in files]
+
+
+@app.post("/api/datasets/upload")
+async def upload_dataset(file: UploadFile = File(...), user: dict = Depends(auth.require_engineer)):
+    stem = SAFE_NAME.sub("_", os.path.splitext(os.path.basename(file.filename or ""))[0]).strip("._")[:80]
+    if not stem or not (file.filename or "").lower().endswith(".csv"):
+        bad_request("Only .csv files are accepted.")
+    contents = await file.read(MAX_UPLOAD_MB * 1_048_576 + 1)
+    if len(contents) > MAX_UPLOAD_MB * 1_048_576:
+        raise HTTPException(status_code=413, detail=f"File larger than {MAX_UPLOAD_MB} MB.")
+    try:
+        df = pd.read_csv(io.BytesIO(contents))
+    except Exception:
+        bad_request("Could not parse the file as CSV.")
+    if df.empty or len(df.columns) < 2:
+        bad_request("The CSV has no data.")
+    # Never overwrite: an existing file may be referenced by approved mappings and model versions.
+    name, n = f"{stem}.csv", 2
+    while os.path.exists(os.path.join(DATASETS_DIR, name)):
+        name, n = f"{stem}_{n}.csv", n + 1
+    with open(os.path.join(DATASETS_DIR, name), "wb") as f:
+        f.write(contents)
+    return {**_dataset_summary(name), "rows": int(len(df))}
+
+
+@app.delete("/api/datasets/{name}")
+def delete_dataset(name: str, user: dict = Depends(auth.require_engineer)):
+    path = dataset_path(name)
+    os.remove(path)
+    mapping = os.path.join(MAPPINGS_DIR, f"{os.path.basename(path)}.mapping.json")
+    if os.path.exists(mapping):
+        os.remove(mapping)
+    return {"ok": True}
+
+
+class ProposeBody(BaseModel):
+    filename: str
+
+
+class ApproveBody(BaseModel):
+    filename: str
+    mapping: List[Dict]
+    proposal_source: Optional[str] = "manual"
+    dry_run: bool = False
+
+
+@app.post("/api/schema/propose")
+def propose_schema(body: ProposeBody, user: dict = Depends(auth.require_engineer)):
+    path = dataset_path(body.filename)
+    raw = pd.read_csv(path)
+    saved = sm.load_mapping(MAPPINGS_DIR, path, raw.columns)
+    if saved:
+        proposal = {"source": "approved", "mapping": saved["mapping"], "profile": sm.profile_dataframe(raw), "warnings": []}
+    else:
+        proposal = sm.propose_mapping(raw, MAPPINGS_DIR)
+    proposal["already_approved"] = saved is not None
+    proposal["canonical_fields"] = sm.load_canonical()["fields"]
+    return proposal
+
+
+@app.post("/api/schema/approve")
+def approve_schema(body: ApproveBody, user: dict = Depends(auth.require_engineer)):
+    path = dataset_path(body.filename)
+    raw = pd.read_csv(path)
+    errors, warnings, rul_info = sm.validate_mapping(raw, body.mapping)
+    if not errors:
+        # Belt-type values must match a configured type (or alias) before training.
+        bt = next((m["source"] for m in body.mapping if m.get("target") == "belt_type"), None)
+        if bt:
+            with get_conn() as conn:
+                types = list_belt_types(conn)
+            unknown = sorted({str(v) for v in raw[bt].dropna().unique() if match_belt_type(types, v) is None})
+            if unknown:
+                warnings.append(f"Belt-type values not configured yet: {unknown[:10]}. Add them under Belt Types "
+                                "(as a new type or an alias) before training.")
     if errors:
         return JSONResponse(status_code=422, content={"saved": False, "errors": errors, "warnings": warnings})
-    if body.get("dry_run"):
+    if body.dry_run:
         # UI validates first so the reviewer sees warnings BEFORE anything is saved
         return {"saved": False, "errors": [], "warnings": warnings, "rul_source": rul_info}
-    sm.save_mapping(MAPPINGS_DIR, csv_path, raw.columns, mapping, body.get("proposal_source", "manual"))
+    sm.save_mapping(MAPPINGS_DIR, path, raw.columns, body.mapping, body.proposal_source or "manual")
     return {"saved": True, "errors": [], "warnings": warnings, "rul_source": rul_info}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Metadata endpoint
+# Model versions (engineer)
 # ─────────────────────────────────────────────────────────────────────────────
 
-@app.get("/metadata")
-async def get_metadata():
-    meta_path = os.path.join(MODELS_DIR, "model_metadata.json")
-    if os.path.exists(meta_path):
-        with open(meta_path) as f:
-            return json.load(f)
-    if MODEL_PAYLOAD is None:
-        return {"error": "No model trained yet."}
-    return {
-        "feature_cols": MODEL_PAYLOAD["feature_cols"],
-        "rul_source": MODEL_PAYLOAD.get("rul_source"),
-        "metrics": MODEL_PAYLOAD["metrics"],
-        "feature_stats": MODEL_PAYLOAD["feature_stats"],
-        "feature_importance": MODEL_PAYLOAD["feature_importance"],
-    }
+class TrainDataset(BaseModel):
+    filename: str
+    belt_type_id: Optional[int] = None
+
+
+class TrainBody(BaseModel):
+    datasets: List[TrainDataset] = Field(min_length=1)
+    notes: str = Field(default="", max_length=500)
+    method: Literal["aft", "regression"] = "aft"   # survival (median + interval) or legacy point regression
+
+
+class ActivateBody(BaseModel):
+    belt_type_ids: Optional[List[int]] = None
+
+
+class ReviewBody(BaseModel):
+    review_note: str = Field(default="", max_length=1000)
+
+
+@app.get("/api/models")
+def get_models(user: dict = Depends(auth.require_engineer)):
+    return reg.list_models()
+
+
+@app.get("/api/models/compare")
+def compare_models(a: int, b: int, user: dict = Depends(auth.require_engineer)):
+    return reg.compare(a, b)
+
+
+@app.get("/api/models/{model_id}")
+def get_model(model_id: int, user: dict = Depends(auth.require_engineer)):
+    m = reg.get_model(model_id)
+    if m is None:
+        raise HTTPException(status_code=404, detail="Model not found.")
+    return m
+
+
+@app.post("/api/models/train", status_code=202)
+def train(body: TrainBody, user: dict = Depends(auth.require_engineer)):
+    for d in body.datasets:
+        dataset_path(d.filename)
+    specs = [{"filename": d.filename, "belt_type_id": d.belt_type_id} for d in body.datasets]
+    return {"id": reg.start_training(specs, body.notes, user["id"], body.method), "status": "training"}
+
+
+@app.post("/api/models/{model_id}/activate")
+def activate_model(model_id: int, body: ActivateBody, user: dict = Depends(auth.require_engineer)):
+    return {"active_for": reg.activate(model_id, user["id"], body.belt_type_ids)}
+
+
+@app.put("/api/models/{model_id}/review")
+def review_model(model_id: int, body: ReviewBody, user: dict = Depends(auth.require_engineer)):
+    with get_conn() as conn:
+        conn.execute("UPDATE models SET review_note = ? WHERE id = ?", (body.review_note, model_id))
+    return {"ok": True}
+
+
+@app.delete("/api/models/{model_id}")
+def delete_model(model_id: int, user: dict = Depends(auth.require_engineer)):
+    reg.delete_model(model_id)
+    return {"ok": True}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Prediction endpoint
+# Development only: synthetic V-belt data
 # ─────────────────────────────────────────────────────────────────────────────
 
-@app.post("/predict")
-async def predict(request: Request):
-    """
-    Predict Remaining Useful Life (RUL) for a belt.
+class GenerateBody(BaseModel):
+    belts: int = Field(default=300, ge=10, le=3000)
+    step: int = Field(default=250, ge=10, le=2000)
+    seed: int = Field(default=42, ge=0, le=2**31)
+    censor_frac: float = Field(default=0.0, ge=0.0, le=0.9)
 
-    Body:
-    {
-        "belt_properties": {
-            "rubber_hardness_shore_a": 65.0,
-            "belt_thickness_mm": 15.0,
-            "tensile_strength_kn_m": 1000.0
-        },
-        "inspections": [
-            {
-                "hour": 0,
-                "load_pct": 70.0,
-                "belt_speed_mps": 3.0,
-                "temperature_c": 30.0,
-                "vibration_mms": 4.0,
-                "wear_pct": 0.0,
-                "elongation_pct": 0.0,
-                "crack_length_mm": 0.0
-            },
-            ...  (more inspection readings)
-        ]
-    }
 
-    Returns: RUL prediction for the LATEST inspection point, plus confidence
-    and the full history of predictions.
-    """
-    if MODEL_PAYLOAD is None:
-        return JSONResponse(status_code=503,
-            content={"error": "Model not loaded. Train a model first via POST /train."})
+@app.post("/api/dev/generate-data")
+def generate_data(body: GenerateBody, user: dict = Depends(auth.require_engineer)):
+    if not DEV_MODE:
+        raise HTTPException(status_code=404, detail="Not found.")
+    out = os.path.join(DATASETS_DIR, f"synthetic_vbelts_seed{body.seed}.csv")
+    # Argument list, no shell: nothing from the request can be interpreted as a command.
+    proc = subprocess.run(
+        [sys.executable, GENERATOR_SCRIPT, "--belts", str(body.belts), "--step", str(body.step),
+         "--seed", str(body.seed), "--censor-frac", str(body.censor_frac), "--output", out],
+        capture_output=True, text=True, timeout=600)
+    if proc.returncode != 0:
+        log.error("Generator failed: %s", proc.stderr)
+        raise HTTPException(status_code=500, detail="Data generation failed (see server log).")
+    return {"filename": os.path.basename(out), "log": proc.stdout[-2000:]}
 
-    data = await request.json()
-    belt_props  = data.get("belt_properties", {})
-    inspections = data.get("inspections", [])
 
-    if not inspections:
-        return JSONResponse(status_code=400, content={"error": "No inspection readings provided."})
-
-    xgb_model = MODEL_PAYLOAD["xgb_model"]
-    feat_cols = MODEL_PAYLOAD["feature_cols"]
-    feat_stats = MODEL_PAYLOAD["feature_stats"]
-    r2 = MODEL_PAYLOAD["metrics"]["xgboost"]["r2_score"]
-
-    # Health/failure thresholds only for degradation measures the model was trained on
-    thresholds = sm.degradation_thresholds(feat_cols)
-    schema_fields = sm.load_canonical()["fields"]
-
-    results = []
-    for idx, insp in enumerate(inspections):
-        # Feature vector follows the TRAINED model's feature list (dataset-dependent).
-        # Missing inputs fall back to the training median instead of hard-coded defaults,
-        # so models trained on customer data with different columns still predict.
-        row = {}
-        for col in feat_cols:
-            val = insp.get(col, belt_props.get(col))
-            row[col] = float(val) if val is not None else feat_stats.get(col, {}).get("median", 0.0)
-        hour = float(insp.get("hour", row.get("hour", 0.0)))
-
-        X = pd.DataFrame([row])[feat_cols]
-        pred_xgb = float(xgb_model.predict(X)[0])
-        pred_rul = max(pred_xgb, 0.0)
-
-        # Degradation ratios use only values actually measured in this inspection
-        ratios = {}
-        for col, thr in thresholds.items():
-            val = insp.get(col)
-            if val is not None:
-                ratios[schema_fields[col]["label"]] = float(val) / thr
-
-        # Physics override clamp: if any failure threshold is met, RUL is strictly 0
-        if any(r >= 1.0 for r in ratios.values()):
-            pred_rul = 0.0
-
-        # Confidence grows with more inspections
-        confidence = compute_confidence(idx + 1, r2)
-
-        # Health score: inverse of the worst degradation ratio (None if nothing measured)
-        if ratios:
-            health_score = round(max(1 - max(ratios.values()), 0.0) * 100, 1)
-            dominant = max(ratios, key=ratios.get)
-        else:
-            health_score, dominant = None, "N/A"
-
-        results.append({
-            "inspection_index": int(idx + 1),
-            "hour":             hour,
-            "rul_hours":        float(round(pred_rul, 0)),
-            "confidence_pct":   float(confidence),
-            "health_score":     health_score,
-            "dominant_driver":  str(dominant),
-            "degradation_state": {
-                c: (float(insp[c]) if c in thresholds and insp.get(c) is not None else None)
-                for c in ("wear_pct", "elongation_pct", "crack_length_mm")
-            },
-        })
-
-    latest = results[-1]
-    return {
-        "belt_properties": belt_props,
-        "total_inspections": len(inspections),
-        "latest_prediction": latest,
-        "prediction_history": results,
-        "model_metrics": MODEL_PAYLOAD["metrics"]["xgboost"],
-    }
+# Frontend (mounted last so /api routes take precedence)
+app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
 
 
 if __name__ == "__main__":
     import uvicorn
-    load_model()
-    uvicorn.run(app, host="0.0.0.0", port=8001, reload=False)
+    logging.basicConfig(level=logging.INFO)
+    uvicorn.run(app, host=os.environ.get("BELT_RUL_HOST", "127.0.0.1"),
+                port=int(os.environ.get("BELT_RUL_PORT", "8001")), reload=False)

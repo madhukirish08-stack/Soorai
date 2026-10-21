@@ -1,86 +1,104 @@
-# Belt RUL Predictor — v2 Intelligence System
+# Belt RUL — Belt Health & Remaining Life
 
-AI-powered Remaining Useful Life (RUL) prediction and degradation forecasting system for industrial conveyor belts. Built on an XGBoost regressor, trained on physics-informed synthetic degradation telemetry or on your plant's own data.
+> AI assistants: read `projectcontext.md` first.
 
----
-
-## 🚀 Key Features
-
-- **Live Browser Dashboard**: Sleek, responsive web interface (`http://localhost:8001/ui`).
-- **Dynamic Progressive Confidence**: Confidence starts at baseline (~40%) on initial inspection and progressively grows toward model accuracy (test $R^2$ on belts held out from training, $\approx 0.89$ on the synthetic data) as more sequential inspection points are recorded.
-- **Works With Any Dataset**: Upload any belt CSV. Gemini proposes how its columns (names, units) map to the model schema, an engineer reviews and approves, and the approved profile is reused for later uploads with the same columns.
-- **Automatic RUL Target**: If the data has no remaining-life column, RUL is computed from recorded failure hours, or estimated from degradation trends (clearly flagged — see [docs/DATA_REQUIREMENTS.md](docs/DATA_REQUIREMENTS.md)).
-- **Physical Clamping & Health Scoring**: Automatic degradation ratio calculations across wear (%), elongation (%), and crack length (mm) with dominant failure driver identification.
-- **FastAPI Backend**: Clean REST endpoints for metadata, dataset listing, on-demand training, and multi-point RUL inference.
-- **Interactive Visualization**: Real-time degradation gauges, RUL trend graphs (via Chart.js), and complete inspection history tables.
+Remaining-useful-life (RUL) prediction and health tracking for industrial **power-transmission belts**: classical wrapped, wedge, raw-edge cogged, Poly-V and others. Plant data is mapped to a common schema with AI help, and an XGBoost model is trained per deployment and versioned. Every prediction is made against the failure limits of the belt's own type.
 
 ---
 
-## 🛠️ Architecture
+## Who uses it
+
+| Role | Does | Where |
+|---|---|---|
+| **Planner** | Registers belts, records inspections, sees RUL and health, records failures and replacements | **Fleet** → belt page |
+| **Engineer** | Everything a planner can do, plus upload data, review column mappings, train, compare and activate model versions, manage belt types and users | All tabs |
+
+### Typical flow
+1. **Engineer:** confirms the failure limits of each **belt type**. The seeded limits are placeholders and are flagged until someone confirms them.
+2. **Engineer:** uploads plant data (any CSV layout) under **Data & Training**. Gemini proposes how the columns map to the model's fields, including unit conversions. The engineer reviews the proposal, sees any warnings, and approves it.
+3. **Engineer:** trains a new model version, then compares it with earlier versions on the **same held-out belts** and **activates** it for its belt types. Older versions stay available for one-click rollback.
+4. **Planner:** opens **Fleet**, which lists the most urgent belts first. They record an inspection and get RUL, health and the measurement closest to its limit.
+5. **Planner:** when a belt fails or is replaced, records the hour and reason. This is the ground truth that improves the next model version.
+
+---
+
+## Architecture
 
 ```
-v2/
-├── backend/
-│   ├── api.py                 # FastAPI REST backend & static file server
-│   ├── train_model.py         # XGBoost RUL trainer
-│   ├── schema_mapper.py       # Column mapping (Gemini proposal), validation, RUL derivation
-│   └── canonical_schema.json  # The field names/units/ranges the model is trained on
-├── frontend/
-│   ├── index.html         # Modern dark-theme web dashboard
-│   ├── script.js          # Interactive UI state & chart logic
-│   └── style.css          # Curated responsive design system
-├── training/
-│   └── training_data_5_oct.py   # Physics-informed synthetic dataset generator
-├── data/
-│   └── belt_rul_training_data.csv  # Active training dataset
-├── mappings/                # Human-approved column mappings (one per dataset)
-├── docs/
-│   └── DATA_REQUIREMENTS.md # What the plant should record (share with the company)
-└── models_v2/
-    └── model_metadata.json  # Feature importance, training metrics & statistics
+backend/
+  api.py                 FastAPI app: REST API + serves the frontend (same origin)
+  auth.py                Users, scrypt passwords, cookie sessions, roles
+  db.py                  SQLite schema: users, belt types, belts, inspections, model versions
+  model_registry.py      Train / version / activate / compare / predict (XGBoost, native format)
+  schema_mapper.py       Column mapping (Gemini + fallback), validation, feature derivation, RUL derivation
+  canonical_schema.json  Field names, units, plausible ranges of the model schema
+  config.py              Settings and .env loading
+  manage.py              Admin CLI (create the first user, reset passwords)
+frontend/                index.html, app.js, style.css (no build step)
+training/
+  generate_synthetic_vbelts.py   Demo data generator (dev mode only); --censor-frac simulates still-running belts
+tests/
+  e2e_flow.py                    Backend end-to-end check: train, activate, compare, predict
+docs/DATA_REQUIREMENTS.md        What the plant should record (share with the client)
+instance/                        Runtime state, git-ignored: datasets/, mappings/, models/, belt_rul.db
 ```
+
+### Modelling decisions
+- **XGBoost only.** On held-out belts it beat the former XGBoost + Random Forest ensemble.
+- **Belts held out for testing.** Test belts are picked by a hash of the belt ID, so a test belt is never in training. This also lets two versions be compared on the same belts.
+- **No fine-tuning.** To add data, train a new version on the old datasets plus the new one (**Retrain + data**).
+- **One model for several belt types**, with belt type as an input. Each type keeps its own failure limits.
+- **Calculated stress features:** belt speed, bending frequency and speed ratio, computed from the drive geometry.
+- **Survival analysis.** Models use XGBoost's `survival:aft` objective. Belts with a recorded failure/replacement hour (or a measured RUL column) are events; belts still running or replaced before failure are *right-censored* at their last hour — never extrapolated. Predictions are a median RUL plus an 80 % interval. A legacy point-regression method (`method: "regression"` on train) remains available. If a belt's failure is inferred from an assumed limit being crossed, that is flagged as *estimated*.
 
 ---
 
-## 📦 Getting Started
+## Setup
 
-### 1. Requirements
-Ensure Python 3.9+ is installed:
+Requires Python 3.10+.
+
 ```bash
-pip install fastapi uvicorn xgboost scikit-learn pandas numpy joblib
-```
-
-### 2. (Optional) Enable AI column mapping
-Set a Gemini API key so uploaded datasets get an AI-proposed column mapping. Without it, the app falls back to name matching and you map columns by hand.
-```powershell
-$env:GEMINI_API_KEY = "<your key>"
-$env:GEMINI_MODEL   = "gemini-3.8-flash"   # optional, this is the default
-```
-
-### 3. Run the Web Application
-```bash
+pip install -r requirements.txt
+cp .env.example .env            # then set GEMINI_API_KEY
+python backend/manage.py create-user <your-name> --role engineer
 python backend/api.py
 ```
-Open your browser at:
-👉 **[http://localhost:8001/ui](http://localhost:8001/ui)** (or simply `http://localhost:8001`)
 
-Interactive API documentation is available at:
-👉 **[http://localhost:8001/docs](http://localhost:8001/docs)**
+The app is then available at http://127.0.0.1:8001. Engineers add further users under **Users**.
 
----
+### Local development
+Set `BELT_RUL_DEV_MODE=1` in `.env`. This enables:
+- the synthetic V-belt generator (**Data & Training**);
+- `/docs`;
+- cookies over plain HTTP.
 
-## ⚙️ Model Training
+**Never enable dev mode on the hosted server.**
 
-You can train or retrain the model at any time:
-1. **Via UI**: Select the dataset in Step 1. If its columns don't already use the model's names, click **"Review Column Mapping"**, check each row (target field, unit conversion `model = raw × scale + offset`), and **Approve**. Then click **"Train Model on Selected Dataset"**.
-2. **Via CLI**:
-   ```bash
-   python backend/train_model.py --csv data/belt_rul_training_data.csv --output models_v2
-   # non-canonical data: pass the mapping approved in the UI
-   python backend/train_model.py --csv data/plant.csv --output models_v2 --mapping mappings/plant.csv.mapping.json
-   ```
-
-The model trains on whichever features the mapped data contains. When the data has no measured RUL or failure hours, the trained model is flagged **Estimated RUL**. Ask the plant to record failures ([docs/DATA_REQUIREMENTS.md](docs/DATA_REQUIREMENTS.md)).
+### Hosting (production)
+- Run behind a reverse proxy with **HTTPS** (nginx, Caddy or IIS). Session cookies are `Secure`, so login only works over HTTPS.
+- The app listens on `127.0.0.1:8001` by default (`BELT_RUL_HOST` / `BELT_RUL_PORT`). Expose only the proxy.
+- Set `BELT_RUL_INSTANCE_DIR` to a persistent, backed-up folder. It holds the client's data, the models and the database.
+- Run a single worker process. Training runs in a background thread, and SQLite plus the model cache are per-process.
+- Keep `.env` readable only by the service account.
 
 ---
 
+### Checking your changes
+```bash
+python training/generate_synthetic_vbelts.py --belts 300 --censor-frac 0.3 --output synth.csv
+python tests/e2e_flow.py synth.csv      # uses a throw-away instance folder; prints held-out metrics
+```
+Held-out metrics reported per model version (Models → Details): MAE, RMSE, R², bias, near-failure MAE, **concordance index** (does the model rank belts by remaining life correctly; 0.5 = random) and **80 % interval coverage** (should be about 80 %). Error figures use belts with a known end of life only.
+
+### What to record for good predictions
+See `docs/DATA_REQUIREMENTS.md`. In short: the operating hour at which each belt failed or was replaced. Belts that are still running or were replaced before failing are fine as well: they are right-censored, not wasted. If your CSV has a failure-hour column, leave it **blank** for belts that did not fail; do not fill it with the replacement hour unless the belt had effectively failed.
+
+---
+
+## Data privacy
+During column mapping, Google Gemini receives the column names, basic statistics and up to 5 sample values per column. Full datasets never leave the server, and training and prediction run locally. Without `GEMINI_API_KEY`, the app falls back to name matching, and the engineer maps the columns by hand.
+
+## Known limitations
+- **Placeholder failure limits.** The seeded belt-type limits are not JK Fenner figures. Confirm them before relying on health scores.
+- **Synthetic demo data.** The synthetic data is not calibrated against real belt tests. Its accuracy figures say nothing about real-world performance.
+- **Interval calibration.** The 80 % interval uses one noise scale (sigma, chosen on a validation split) for all belts, so its width is proportional to the median RUL. Check the held-out interval coverage under Models → Details.

@@ -3,454 +3,76 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Belt RUL Predictor — Remaining Useful Life Intelligence</title>
-  <meta name="description" content="AI-powered Remaining Useful Life prediction for conveyor belts. Input inspection readings and get real-time RUL forecasts with growing confidence." />
+  <title>Belt RUL — Belt Health & Remaining Life</title>
+  <meta name="description" content="Remaining-useful-life prediction and health tracking for industrial power-transmission belts." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <!-- ═══════════════════ HEADER ═══════════════════ -->
-  <header class="header">
-    <div class="header-inner">
-      <div class="logo">
+  <!-- ═══════════ LOGIN ═══════════ -->
+  <div id="login-view" class="login-wrap hidden">
+    <form id="login-form" class="card login-card" autocomplete="on">
+      <div class="logo login-logo">
         <span class="logo-icon">⚙</span>
         <div>
           <div class="logo-name">Belt<span class="logo-accent">RUL</span></div>
-          <div class="logo-sub">Remaining Useful Life Intelligence</div>
+          <div class="logo-sub">Belt Health &amp; Remaining Life</div>
         </div>
       </div>
-      <div class="header-status">
-        <div id="model-status" class="status-badge status-idle">
-          <span class="status-dot"></span>
-          <span id="model-status-text">No model loaded</span>
-        </div>
+      <div class="form-group">
+        <label for="login-username">Username</label>
+        <input type="text" id="login-username" autocomplete="username" required />
       </div>
-    </div>
-  </header>
+      <div class="form-group">
+        <label for="login-password">Password</label>
+        <input type="password" id="login-password" autocomplete="current-password" required />
+      </div>
+      <div id="login-error" class="notice notice-error hidden"></div>
+      <button type="submit" class="btn btn-primary btn-large btn-block">Sign in</button>
+    </form>
+  </div>
 
-  <!-- ═══════════════════ STEPPER NAV ═══════════════════ -->
-  <nav class="stepper">
-    <div class="stepper-inner">
-      <div class="step active" id="step-nav-1" onclick="goToStep(1)">
-        <div class="step-num">1</div>
-        <div class="step-label">Dataset</div>
-      </div>
-      <div class="step-line"></div>
-      <div class="step" id="step-nav-2">
-        <div class="step-num">2</div>
-        <div class="step-label">Belt Setup</div>
-      </div>
-      <div class="step-line"></div>
-      <div class="step" id="step-nav-3">
-        <div class="step-num">3</div>
-        <div class="step-label">Inspect & Results</div>
-      </div>
-    </div>
-  </nav>
-
-  <!-- ═══════════════════ MAIN CONTENT ═══════════════════ -->
-  <main class="main">
-
-    <!-- ───────── STEP 1: DATASET ───────── -->
-    <section class="panel" id="panel-1">
-      <div class="panel-header">
-        <div class="panel-icon">🗄</div>
-        <div>
-          <h1 class="panel-title">Select Training Dataset</h1>
-          <p class="panel-subtitle">Choose an existing dataset or upload a new CSV to train the RUL model.</p>
-        </div>
-      </div>
-
-      <!-- Generate fresh data -->
-      <div class="card generate-card">
-        <div class="card-title">
-          <span class="card-icon">⚡</span> Generate Fresh Synthetic Data
-        </div>
-        <p class="card-desc">Run <code>training_data_5_oct.py</code> to generate a new physics-informed dataset.</p>
-        <div class="form-row">
-          <div class="form-group">
-            <label>Number of Belts</label>
-            <input type="number" id="gen-belts" value="300" min="50" max="2000" />
-          </div>
-          <div class="form-group">
-            <label>Max Hours</label>
-            <input type="number" id="gen-max-hours" value="20000" min="5000" max="50000" step="1000" />
-          </div>
-          <div class="form-group">
-            <label>Step (hrs)</label>
-            <input type="number" id="gen-step" value="100" min="10" max="500" />
-          </div>
-          <div class="form-group">
-            <label>Random Seed</label>
-            <input type="number" id="gen-seed" value="42" />
+  <!-- ═══════════ APP ═══════════ -->
+  <div id="app-view" class="hidden">
+    <header class="header">
+      <div class="header-inner">
+        <div class="logo">
+          <span class="logo-icon">⚙</span>
+          <div>
+            <div class="logo-name">Belt<span class="logo-accent">RUL</span></div>
+            <div class="logo-sub">Belt Health &amp; Remaining Life</div>
           </div>
         </div>
-        <button class="btn btn-outline" id="btn-generate" onclick="generateData()">
-          <span class="btn-icon">⚡</span> Generate Dataset
-        </button>
-        <div id="gen-log" class="log-box hidden"></div>
-      </div>
-
-      <!-- Available datasets -->
-      <div class="card">
-        <div class="card-title">
-          <span class="card-icon">📂</span> Available Datasets
-          <button class="btn-icon-only" onclick="loadDatasets()" title="Refresh">↻</button>
-        </div>
-        <div id="dataset-list" class="dataset-list">
-          <div class="empty-state">Loading datasets…</div>
+        <nav class="main-nav" id="main-nav"></nav>
+        <div class="user-box">
+          <span class="user-name" id="user-name"></span>
+          <span class="role-chip" id="user-role"></span>
+          <button class="btn btn-ghost btn-sm" data-action="logout">Sign out</button>
         </div>
       </div>
+    </header>
 
-      <!-- Upload new CSV -->
-      <div class="card upload-card">
-        <div class="card-title"><span class="card-icon">⬆</span> Upload New CSV</div>
-        <label class="upload-drop" id="upload-drop">
-          <input type="file" id="upload-file" accept=".csv" onchange="uploadDataset()" hidden />
-          <div class="upload-icon">📄</div>
-          <div class="upload-text">Drag & drop a CSV file here or <span class="link">click to browse</span></div>
-          <div class="upload-hint">Any belt telemetry CSV — columns are mapped to the model schema in the next step</div>
-        </label>
-        <div id="upload-status" class="hidden"></div>
-      </div>
+    <main class="main">
+      <section class="view hidden" id="view-fleet"></section>
+      <section class="view hidden" id="view-belt"></section>
+      <section class="view hidden" id="view-types"></section>
+      <section class="view hidden" id="view-data"></section>
+      <section class="view hidden" id="view-models"></section>
+      <section class="view hidden" id="view-users"></section>
+    </main>
+  </div>
 
-      <!-- Column mapping review (human-in-the-loop: LLM proposes, user approves) -->
-      <div class="card mapping-card hidden" id="mapping-card">
-        <div class="card-title"><span class="card-icon">🧭</span> Review Column Mapping
-          <span class="mapping-source" id="mapping-source"></span>
-        </div>
-        <p class="card-desc">
-          Each column of your dataset is matched to a field the model understands. Check every row —
-          especially low-confidence ones and unit conversions (<code>model value = raw × scale + offset</code>).
-          Nothing is used for training until you approve.
-        </p>
-        <div id="mapping-warnings"></div>
-        <div class="table-wrap">
-          <table class="inspection-table mapping-table">
-            <thead>
-              <tr><th>Your column</th><th>Sample values</th><th>Maps to</th><th>Confidence</th><th>Scale</th><th>Offset</th><th>Why</th></tr>
-            </thead>
-            <tbody id="mapping-tbody"></tbody>
-          </table>
-        </div>
-        <div id="mapping-result"></div>
-        <div class="action-row">
-          <button class="btn btn-ghost" onclick="closeMapping()">Cancel</button>
-          <button class="btn btn-primary" id="btn-approve-mapping" onclick="approveMapping()">✓ Approve Mapping</button>
-        </div>
-      </div>
-
-      <!-- Train model button -->
-      <div class="action-row">
-        <div id="selected-dataset-display" class="selected-info">No dataset selected</div>
-        <button class="btn btn-outline" id="btn-map" onclick="openMapping()" disabled>🧭 Review Column Mapping</button>
-        <button class="btn btn-primary btn-large" id="btn-train" onclick="trainModel()" disabled>
-          <span class="btn-spinner hidden" id="train-spinner">⟳</span>
-          Train Model on Selected Dataset
-        </button>
-      </div>
-
-      <div id="train-result" class="train-result hidden"></div>
-    </section>
-
-    <!-- ───────── STEP 2: BELT SETUP ───────── -->
-    <section class="panel hidden" id="panel-2">
-      <div class="panel-header">
-        <div class="panel-icon">🔩</div>
-        <div>
-          <h2 class="panel-title">New Belt Configuration</h2>
-          <p class="panel-subtitle">Enter the static belt properties once. Operating conditions will be entered per inspection.</p>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-title"><span class="card-icon">🏷</span> Belt Identity</div>
-        <div class="form-row">
-          <div class="form-group full-width">
-            <label>Belt Name / ID</label>
-            <input type="text" id="belt-name" placeholder="e.g. BLT-TEST-001" />
-          </div>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-title"><span class="card-icon">🧱</span> Static Material Properties</div>
-        <p class="card-desc">These are fixed properties of the belt measured at manufacture time.</p>
-        <div class="form-row cols-3">
-          <div class="form-group">
-            <label>Rubber Hardness <span class="unit">(Shore A)</span></label>
-            <input type="number" id="hardness" value="65" min="40" max="90" step="0.5" />
-            <span class="hint">Typical: 55–75</span>
-          </div>
-          <div class="form-group">
-            <label>Belt Thickness <span class="unit">(mm)</span></label>
-            <input type="number" id="thickness" value="15" min="8" max="30" step="0.5" />
-            <span class="hint">Typical: 12–20 mm</span>
-          </div>
-          <div class="form-group">
-            <label>Tensile Strength <span class="unit">(kN/m)</span></label>
-            <input type="number" id="tensile" value="1000" min="600" max="1500" step="10" />
-            <span class="hint">Typical: 800–1200 kN/m</span>
-          </div>
-        </div>
-      </div>
-
-      <div class="action-row">
-        <button class="btn btn-ghost" onclick="goToStep(1)">← Back</button>
-        <button class="btn btn-primary btn-large" onclick="startInspections()">
-          Start Inspections →
-        </button>
-      </div>
-    </section>
-
-    <!-- ───────── STEP 3: INSPECTIONS ───────── -->
-    <section class="panel hidden" id="panel-3">
-      <div class="panel-header">
-        <div class="panel-icon">🔬</div>
-        <div>
-          <h2 class="panel-title">Hour-by-Hour Inspection</h2>
-          <p class="panel-subtitle">Enter operating conditions and degradation readings for each inspection point. Confidence grows with each reading.</p>
-        </div>
-      </div>
-
-      <!-- Belt info bar -->
-      <div class="belt-info-bar">
-        <div class="belt-info-item">
-          <span class="belt-info-label">Belt ID</span>
-          <span class="belt-info-value" id="insp-belt-name">—</span>
-        </div>
-        <div class="belt-info-item">
-          <span class="belt-info-label">Hardness</span>
-          <span class="belt-info-value" id="insp-hardness">—</span>
-        </div>
-        <div class="belt-info-item">
-          <span class="belt-info-label">Thickness</span>
-          <span class="belt-info-value" id="insp-thickness">—</span>
-        </div>
-        <div class="belt-info-item">
-          <span class="belt-info-label">Tensile Str.</span>
-          <span class="belt-info-value" id="insp-tensile">—</span>
-        </div>
-        <div class="belt-info-item">
-          <span class="belt-info-label">Inspections</span>
-          <span class="belt-info-value accent" id="insp-count">0</span>
-        </div>
-      </div>
-
-      <div class="inspection-layout">
-        <!-- Left: form -->
-        <div class="inspection-form-col">
-          <div class="card">
-            <div class="card-title"><span class="card-icon">⏱</span> Inspection Time</div>
-            <div class="form-row">
-              <div class="form-group full-width">
-                <label>Current Hour of Operation</label>
-                <input type="number" id="insp-hour" value="0" min="0" max="30000" step="100" />
-              </div>
-            </div>
-          </div>
-
-          <div class="card">
-            <div class="card-title"><span class="card-icon">⚙</span> Operating Conditions</div>
-            <p class="card-desc">Conditions at the time of this inspection.</p>
-            <div class="form-row cols-2">
-              <div class="form-group">
-                <label>Load <span class="unit">(%)</span></label>
-                <input type="number" id="insp-load" value="70" min="10" max="110" step="0.5" />
-                <input type="range" class="slider" id="insp-load-slider" min="10" max="110" value="70" oninput="syncSlider('insp-load','insp-load-slider')" />
-              </div>
-              <div class="form-group">
-                <label>Belt Speed <span class="unit">(m/s)</span></label>
-                <input type="number" id="insp-speed" value="3.0" min="0.5" max="6" step="0.1" />
-                <input type="range" class="slider" id="insp-speed-slider" min="0.5" max="6" step="0.1" value="3.0" oninput="syncSlider('insp-speed','insp-speed-slider')" />
-              </div>
-              <div class="form-group">
-                <label>Temperature <span class="unit">(°C)</span></label>
-                <input type="number" id="insp-temp" value="30" min="10" max="85" step="0.5" />
-                <input type="range" class="slider" id="insp-temp-slider" min="10" max="85" value="30" oninput="syncSlider('insp-temp','insp-temp-slider')" />
-              </div>
-              <div class="form-group">
-                <label>Vibration <span class="unit">(mm/s)</span></label>
-                <input type="number" id="insp-vib" value="4.0" min="1" max="20" step="0.1" />
-                <input type="range" class="slider" id="insp-vib-slider" min="1" max="20" step="0.1" value="4.0" oninput="syncSlider('insp-vib','insp-vib-slider')" />
-              </div>
-            </div>
-          </div>
-
-          <!-- Inputs for model features that have no fixed field above (built from the trained model) -->
-          <div class="card hidden" id="extra-inputs-card">
-            <div class="card-title"><span class="card-icon">➕</span> Additional Model Inputs</div>
-            <p class="card-desc">The current model was trained on these extra columns. Pre-filled with the training median — replace with your readings.</p>
-            <div class="form-row cols-2" id="extra-inputs"></div>
-          </div>
-
-          <div class="card">
-            <div class="card-title"><span class="card-icon">📏</span> Degradation Readings</div>
-            <p class="card-desc">Physical measurements taken during inspection. Leave at 0 if not yet degraded.</p>
-            <div class="form-row cols-3">
-              <div class="form-group">
-                <label>Surface Wear <span class="unit">(%)</span></label>
-                <input type="number" id="insp-wear" value="0" min="0" max="100" step="0.1" />
-                <div class="threshold-bar">
-                  <div class="threshold-fill wear-fill" id="wear-fill" style="width:0%"></div>
-                </div>
-                <span class="hint">Failure at 100%</span>
-              </div>
-              <div class="form-group">
-                <label>Elongation <span class="unit">(%)</span></label>
-                <input type="number" id="insp-elong" value="0" min="0" max="4" step="0.01" />
-                <div class="threshold-bar">
-                  <div class="threshold-fill elong-fill" id="elong-fill" style="width:0%"></div>
-                </div>
-                <span class="hint">Failure at 4%</span>
-              </div>
-              <div class="form-group">
-                <label>Crack Length <span class="unit">(mm)</span></label>
-                <input type="number" id="insp-crack" value="0" min="0" max="50" step="0.1" />
-                <div class="threshold-bar">
-                  <div class="threshold-fill crack-fill" id="crack-fill" style="width:0%"></div>
-                </div>
-                <span class="hint">Failure at 50mm</span>
-              </div>
-            </div>
-          </div>
-
-          <div class="action-row">
-            <button class="btn btn-ghost" onclick="goToStep(2)">← Back</button>
-            <button class="btn btn-primary btn-large" id="btn-predict" onclick="addInspection()">
-              <span class="btn-icon">🔮</span> Predict RUL
-            </button>
-          </div>
-        </div>
-
-        <!-- Right: live results -->
-        <div class="results-col" id="results-col">
-          <div class="results-empty" id="results-empty">
-            <div class="results-empty-icon">🔮</div>
-            <div>Submit your first inspection to see the RUL prediction.</div>
-            <div class="results-empty-sub">Confidence will grow with each reading.</div>
-          </div>
-
-          <!-- RUL Card (hidden until first prediction) -->
-          <div class="rul-card hidden" id="rul-card">
-            <div class="rul-header">Remaining Useful Life</div>
-            <div class="rul-value" id="rul-value">— hrs</div>
-            <div class="rul-sub" id="rul-sub">—</div>
-
-            <div class="confidence-section">
-              <div class="confidence-label">
-                <span>Model Confidence</span>
-                <span class="confidence-pct" id="confidence-pct">—</span>
-              </div>
-              <div class="confidence-bar-bg">
-                <div class="confidence-bar-fill" id="confidence-bar" style="width:0%"></div>
-              </div>
-            </div>
-
-            <div class="health-grid">
-              <div class="health-item">
-                <div class="health-label">Health Score</div>
-                <div class="health-value" id="health-score">—</div>
-              </div>
-              <div class="health-item">
-                <div class="health-label">Dominant Risk</div>
-                <div class="health-value risk" id="dominant-risk">—</div>
-              </div>
-              <div class="health-item">
-                <div class="health-label">Runtime (hrs)</div>
-                <div class="health-value" id="runtime-hrs">—</div>
-              </div>
-              <div class="health-item">
-                <div class="health-label">Inspections</div>
-                <div class="health-value" id="insp-count-card">—</div>
-              </div>
-            </div>
-
-            <!-- Degradation gauges -->
-            <div class="gauge-row">
-              <div class="gauge">
-                <div class="gauge-label">Wear</div>
-                <div class="gauge-ring" id="gauge-wear">
-                  <svg viewBox="0 0 80 80">
-                    <circle cx="40" cy="40" r="34" class="gauge-bg"/>
-                    <circle cx="40" cy="40" r="34" class="gauge-fg wear-gauge" id="gauge-wear-circle"
-                      stroke-dasharray="213.6" stroke-dashoffset="213.6"/>
-                  </svg>
-                  <div class="gauge-pct" id="gauge-wear-pct">0%</div>
-                </div>
-              </div>
-              <div class="gauge">
-                <div class="gauge-label">Elongation</div>
-                <div class="gauge-ring">
-                  <svg viewBox="0 0 80 80">
-                    <circle cx="40" cy="40" r="34" class="gauge-bg"/>
-                    <circle cx="40" cy="40" r="34" class="gauge-fg elong-gauge" id="gauge-elong-circle"
-                      stroke-dasharray="213.6" stroke-dashoffset="213.6"/>
-                  </svg>
-                  <div class="gauge-pct" id="gauge-elong-pct">0%</div>
-                </div>
-              </div>
-              <div class="gauge">
-                <div class="gauge-label">Crack</div>
-                <div class="gauge-ring">
-                  <svg viewBox="0 0 80 80">
-                    <circle cx="40" cy="40" r="34" class="gauge-bg"/>
-                    <circle cx="40" cy="40" r="34" class="gauge-fg crack-gauge" id="gauge-crack-circle"
-                      stroke-dasharray="213.6" stroke-dashoffset="213.6"/>
-                  </svg>
-                  <div class="gauge-pct" id="gauge-crack-pct">0%</div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- History chart -->
-          <div class="card history-card hidden" id="history-card">
-            <div class="card-title"><span class="card-icon">📈</span> Prediction History</div>
-            <canvas id="rul-chart" height="200"></canvas>
-          </div>
-
-          <!-- History table -->
-          <div class="card hidden" id="history-table-card">
-            <div class="card-title"><span class="card-icon">📋</span> Inspection Log</div>
-            <div class="table-wrap">
-              <table class="inspection-table" id="inspection-table">
-                <thead>
-                  <tr>
-                    <th>#</th>
-                    <th>Hour</th>
-                    <th>RUL (hrs)</th>
-                    <th>Confidence</th>
-                    <th>Health</th>
-                    <th>Wear</th>
-                    <th>Elong.</th>
-                    <th>Crack</th>
-                  </tr>
-                </thead>
-                <tbody id="inspection-tbody"></tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-  </main>
-
-  <!-- ═══════════════════ TOAST ═══════════════════ -->
   <div id="toast" class="toast hidden"></div>
-
-  <!-- ═══════════════════ LOADING OVERLAY ═══════════════════ -->
   <div id="overlay" class="overlay hidden">
     <div class="overlay-box">
       <div class="spinner"></div>
-      <div class="overlay-text" id="overlay-text">Training model…</div>
-      <div class="overlay-sub" id="overlay-sub">This may take a minute.</div>
+      <div class="overlay-text" id="overlay-text">Working…</div>
+      <div class="overlay-sub" id="overlay-sub"></div>
     </div>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-  <script src="script.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>
