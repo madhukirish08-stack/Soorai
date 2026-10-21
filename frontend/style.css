@@ -553,6 +553,17 @@ textarea { font-family: 'Inter', sans-serif; resize: vertical; }
 .card-title .btn-icon-only { margin-left: auto; }
 .notice-info { background: var(--accent-dim); border-color: var(--accent); color: var(--text); }
 
+/* ── Bulk import & accuracy ──────────────────────────────── */
+.header-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+a.btn { text-decoration: none; }
+.import-card { border-color: var(--accent); }
+.import-summary { display: flex; gap: 12px; flex-wrap: wrap; margin: 16px 0; }
+.import-errors { max-height: 280px; overflow-y: auto; }
+.data-table tr.col-ignored td { color: var(--text-muted); }
+.hit-yes { color: var(--green); font-weight: 700; }
+.hit-no  { color: var(--red);   font-weight: 700; }
+.import-card .data-table td.wrap { max-width: 420px; }
+
 @media (max-width: 900px) {
   .belt-layout, .detail-grid { grid-template-columns: 1fr; }
   .header-inner { flex-wrap: wrap; }

@@ -63,6 +63,7 @@ Other sensors you already have (motor current, bearing temperature …) are welc
 - **Missing values:** leave the cell empty. Never write `0`, because `0` is read as a real measurement.
 - **New belt, new ID:** don't reuse the old belt's ID for its replacement.
 - **CSV uploads:** one header row and one row per belt per inspection. Exports from Excel, SCADA or a maintenance system are fine.
+- **Bulk import in the app:** on the Fleet page, **Import from CSV** loads many belts or inspections at once (download the template there). The file is checked first and nothing is saved until it is error-free. Use plain numbers (`1800`, not `1,800`), a dot for decimals, dates like `2025-01-31`, and the units shown in the template.
 
 ```csv
 Drive,Section,Run Hrs,Small Pulley mm,Big Pulley mm,Belt Len mm,RPM,Load %,Temp C,Slip %,Stretch %,Side wear %,Crack mm,Failure Hour

@@ -58,6 +58,8 @@ CREATE TABLE IF NOT EXISTS inspections (
     hour          REAL NOT NULL,
     readings_json TEXT NOT NULL,
     predicted_rul REAL,
+    predicted_low  REAL,
+    predicted_high REAL,
     health_score  REAL,
     model_id      INTEGER REFERENCES models(id),
     created_at    TEXT NOT NULL,
@@ -124,10 +126,21 @@ def get_conn():
         conn.close()
 
 
+# Columns added after the first release: (table, column, type). init_db adds any that are missing,
+# so databases created by an older version upgrade in place without losing data.
+MIGRATIONS = [
+    ("inspections", "predicted_low", "REAL"),
+    ("inspections", "predicted_high", "REAL"),
+]
+
+
 def init_db() -> None:
     with get_conn() as conn:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(SCHEMA)
+        for table, column, ctype in MIGRATIONS:
+            if column not in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ctype}")
         if conn.execute("SELECT COUNT(*) FROM belt_types").fetchone()[0] == 0:
             for t in SEED_BELT_TYPES:
                 conn.execute(

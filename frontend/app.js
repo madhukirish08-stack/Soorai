@@ -18,6 +18,8 @@ const state = {
   families: [],
   degFields: [],
   fleet: [],
+  importReport: null,   // last bulk-import dry-run: { kind, file, report }
+  accuracy: null,       // /api/accuracy (engineer)
   filter: { q: '', type: '' },
   belt: null,            // current belt detail payload
   editBelt: null,        // belt being edited in the belt form (null = new)
@@ -207,9 +209,13 @@ async function renderFleet() {
         <h1 class="panel-title">Belt Fleet</h1>
         <p class="panel-subtitle">Most urgent belts first. Click a belt to record an inspection.</p>
       </div>
-      <button class="btn btn-primary" data-action="new-belt">+ Add belt</button>
+      <div class="header-actions">
+        <button class="btn btn-outline" data-action="open-import">⬆ Import from CSV</button>
+        <button class="btn btn-primary" data-action="new-belt">+ Add belt</button>
+      </div>
     </div>
     <div id="fleet-summary" class="summary-row"></div>
+    <div id="import-card"></div>
     <div id="belt-form-card"></div>
     <div class="card">
       <div class="toolbar">
@@ -352,6 +358,7 @@ async function renderBelt(id) {
       <button class="btn btn-ghost" data-action="edit-belt">Edit belt</button>
     </div>
     ${banners.join('')}
+    ${outcomeBannerHtml(belt, inspections)}
     <div id="belt-form-card"></div>
     <div class="belt-layout">
       <div>
@@ -389,16 +396,17 @@ async function renderBelt(id) {
     <div class="card"><div class="card-title">📈 History</div><canvas id="belt-chart" height="110"></canvas></div>
     <div class="card"><div class="card-title">📋 Inspection log</div>
       <div class="table-wrap"><table class="data-table">
-        <thead><tr><th>Hour</th><th>RUL now</th><th>RUL at the time</th><th>Health</th><th>Elong.</th><th>Wear</th><th>Crack</th><th>By</th><th></th></tr></thead>
+        <thead><tr><th>Hour</th><th>RUL now</th><th>RUL at the time</th>${inService ? '' : '<th>What happened</th>'}<th>Health</th><th>Elong.</th><th>Wear</th><th>Crack</th><th>By</th><th></th></tr></thead>
         <tbody>${inspections.map((i, k) => ({ i, p: predictions[k] })).reverse().map(({ i, p }) => `
           <tr><td>${hours(i.hour)}</td><td class="rul-cell">${hours(p.rul_hours)}</td>
-          <td class="muted">${i.predicted_rul !== null ? `${hours(i.predicted_rul)}${i.model_id ? ` · v${i.model_id}` : ''}` : '—'}</td>
+          <td class="muted">${i.predicted_rul !== null ? `${hours(i.predicted_rul)}${i.predicted_low != null ? ` <span class="hint">(${Math.round(i.predicted_low).toLocaleString()}–${Math.round(i.predicted_high).toLocaleString()})</span>` : ''}${i.model_id ? ` · v${i.model_id}` : ''}` : '—'}</td>
+          ${inService ? '' : `<td>${actualCellHtml(i)}</td>`}
           <td>${p.health_score ?? '—'}${p.health_score != null ? '%' : ''} ${tierChip(p.tier)}</td>
           <td>${fmt(i.readings.elongation_pct)}</td><td>${fmt(i.readings.wear_pct)}</td><td>${fmt(i.readings.crack_depth_mm)}</td>
           <td class="muted">${esc(i.created_by_name || '')}</td>
           <td>${inService ? `<button class="btn-icon-only" title="Delete this inspection" data-action="delete-inspection" data-id="${i.id}">✕</button>` : ''}</td></tr>`).join('')}
         </tbody></table></div></div>` : ''}`;
-  drawBeltChart(predictions);
+  drawBeltChart(predictions, inspections);
 }
 
 function latestCardHtml(p, bt, model) {
@@ -433,7 +441,30 @@ function latestCardHtml(p, bt, model) {
     </div>`;
 }
 
-function drawBeltChart(predictions) {
+// What actually happened after an inspection, next to what the model said at the time.
+function actualCellHtml(i) {
+  if (i.actual_rul === null || i.actual_rul === undefined) return '<span class="muted">—</span>';
+  if (i.actual_kind === 'replaced') return `<span class="muted">lasted ≥ ${hours(i.actual_rul)} more</span>`;
+  const mark = i.in_interval === true ? '<span class="hit-yes" title="The actual remaining life was inside the predicted range">✓ in range</span>'
+             : i.in_interval === false ? '<span class="hit-no" title="The actual remaining life was outside the predicted range">✗ outside</span>' : '';
+  return `${hours(i.actual_rul)} ${mark}`;
+}
+
+function outcomeBannerHtml(belt, inspections) {
+  if (belt.status === 'in_service') return '';
+  const judged = inspections.filter(i => i.actual_rul !== null && i.predicted_rul !== null && i.model_id);
+  if (!judged.length) return '';
+  const last = judged[judged.length - 1];
+  if (belt.status === 'replaced') {
+    return `<div class="notice notice-info"><strong>Replaced, not failed.</strong> At its last inspection (${hours(last.hour)}) the model predicted ${hours(last.predicted_rul)} left; the belt then ran at least ${hours(last.actual_rul)} more before it was replaced, so this belt is not counted as a failure when judging model accuracy.</div>`;
+  }
+  const err = last.predicted_rul - last.actual_rul;
+  const range = last.predicted_low != null ? ` (range ${Math.round(last.predicted_low).toLocaleString()}–${Math.round(last.predicted_high).toLocaleString()} h)` : '';
+  const verdict = last.in_interval === true ? 'The actual outcome was inside the predicted range.' : last.in_interval === false ? 'The actual outcome was outside the predicted range.' : '';
+  return `<div class="notice notice-info"><strong>How the model did.</strong> At its last inspection (${hours(last.hour)}, model v${last.model_id}) it predicted ${hours(last.predicted_rul)} left${range}. The belt failed ${hours(last.actual_rul)} later — the prediction was ${err > 0 ? `${hours(err)} too optimistic` : err < 0 ? `${hours(-err)} too cautious` : 'exact'}. ${verdict}</div>`;
+}
+
+function drawBeltChart(predictions, inspections = []) {
   if (state.chart) { state.chart.destroy(); state.chart = null; }
   const canvas = $('#belt-chart');
   if (!canvas || typeof Chart === 'undefined') return;
@@ -449,6 +480,9 @@ function drawBeltChart(predictions) {
           borderWidth: 2.5, pointRadius: 4, tension: 0.3, fill: false, yAxisID: 'y' },
         { label: 'Health (%)', data: predictions.map(p => p.health_score), borderColor: '#22d3a0', borderDash: [5, 4],
           borderWidth: 2, pointRadius: 3, tension: 0.3, yAxisID: 'y1' },
+        ...(inspections.some(i => i.actual_kind === 'failed') ? [
+          { label: 'Actual remaining life (h)', data: inspections.map(i => i.actual_kind === 'failed' ? i.actual_rul : null),
+            borderColor: '#f59e0b', borderWidth: 2, pointRadius: 4, pointStyle: 'rectRot', tension: 0.3, spanGaps: true, yAxisID: 'y' }] : []),
       ],
     },
     options: {
@@ -567,7 +601,8 @@ async function renderData() {
       <p class="panel-subtitle">1. Upload plant data → 2. review the column mapping → 3. train a new model version → 4. review and activate it under Models.</p></div></div>
 
     <div class="card">
-      <div class="card-title">📂 Datasets</div>
+      <div class="card-title">📂 Datasets
+        <button class="btn btn-outline btn-sm" data-action="dataset-from-fleet" title="Turns the inspections and failures recorded in the app into a training dataset">Create from fleet records</button></div>
       <label class="upload-drop" id="upload-drop">
         <input type="file" id="upload-file" accept=".csv" hidden />
         <div class="upload-text">Drop a CSV here or <span class="link">browse</span></div>
@@ -793,7 +828,7 @@ async function generateData() {
 // MODELS (engineer)
 // ═══════════════════════════════════════════════════════════════════════════
 async function renderModels() {
-  [state.models] = await Promise.all([api('/api/models'), loadTypes()]);
+  [state.models, state.accuracy] = await Promise.all([api('/api/models'), api('/api/accuracy'), loadTypes()]);
   state.compareSel = new Set([...state.compareSel].filter(id => state.models.some(m => m.id === id && m.status === 'ready')));
   const m = state.models;
   $('#view-models').innerHTML = `
@@ -804,9 +839,10 @@ async function renderModels() {
     <div id="compare-card"></div>
     <div id="model-detail-card"></div>
     <div class="card"><div class="table-wrap"><table class="data-table">
-      <thead><tr><th></th><th>Version</th><th>Created</th><th>Belt types</th><th>Belts</th><th>Avg error</th><th>Near-failure</th><th>Bias</th><th>Status</th><th></th></tr></thead>
-      <tbody>${m.length ? m.map(modelRowHtml).join('') : '<tr><td colspan="10" class="empty-state">No model versions yet. Train one under Data &amp; Training.</td></tr>'}</tbody>
-    </table></div></div>`;
+      <thead><tr><th></th><th>Version</th><th>Created</th><th>Belt types</th><th>Belts</th><th>Avg error</th><th>Near-failure</th><th>Bias</th><th title="Measured on belts that really failed in your fleet, using the prediction made at each inspection">Real failures</th><th>Status</th><th></th></tr></thead>
+      <tbody>${m.length ? m.map(modelRowHtml).join('') : '<tr><td colspan="11" class="empty-state">No model versions yet. Train one under Data &amp; Training.</td></tr>'}</tbody>
+    </table></div></div>
+    ${accuracyCardHtml(state.accuracy)}`;
   if (m.some(x => x.status === 'training')) {
     stopPolling();
     state.pollTimer = setInterval(async () => {
@@ -837,6 +873,7 @@ function modelRowHtml(m) {
     <td>${ready ? `± ${hours(k.mae_hours)}` : ''}</td>
     <td>${ready ? `± ${hours(k.near_failure_mae_hours)}` : ''}</td>
     <td>${ready ? biasText(k.bias_hours) : ''}</td>
+    <td>${ready ? realAccuracyCell(m.id) : ''}</td>
     <td>${status}</td>
     <td class="row-actions">
       ${ready ? `<button class="btn btn-primary btn-sm" data-action="activate-model" data-id="${m.id}">Activate</button>
@@ -844,6 +881,53 @@ function modelRowHtml(m) {
       <button class="btn btn-ghost btn-sm" data-action="retrain-model" data-id="${m.id}">Retrain + data</button>` : ''}
       ${!m.active_for.length && m.status !== 'training' ? `<button class="btn-icon-only" title="Delete version" data-action="delete-model" data-id="${m.id}">✕</button>` : ''}
     </td></tr>`;
+}
+
+function realAccuracyCell(modelId) {
+  const a = state.accuracy?.models.find(x => x.model_id === modelId);
+  if (!a) return '<span class="muted" title="No belt that this version predicted has failed yet">—</span>';
+  return `± ${hours(a.mae_hours)} <span class="hint">· ${a.failed_belts} belt${a.failed_belts === 1 ? '' : 's'}${a.low_sample ? ' ⚠' : ''}</span>`;
+}
+
+function accuracyCardHtml(acc) {
+  if (!acc) return '';
+  const min = acc.min_failed_for_confidence;
+  if (!acc.models.length) {
+    return `<div class="card"><div class="card-title">🎯 Real-world accuracy</div>
+      <p class="card-desc">Nothing to judge yet. When a belt is recorded as <strong>failed</strong>, the model's earlier predictions for it are compared with what actually happened, and the results appear here.
+      Belts that were replaced early are shown separately — they only prove a belt lasted <em>at least</em> that long.</p>
+      ${acc.total_replaced_belts ? `<div class="hint">${acc.total_replaced_belts} replaced belt(s) recorded so far.</div>` : ''}</div>`;
+  }
+  const bucketRows = acc.models.map(a => a.buckets.map((b, k) => `<tr>
+      ${k === 0 ? `<td class="strong" rowspan="${a.buckets.length}">v${a.model_id}</td>` : ''}
+      <td>${esc(b.label)}</td><td>${b.n}</td><td>± ${hours(b.mae_hours)}</td><td>${biasText(b.bias_hours)}</td>
+      <td>${b.coverage === null ? '—' : `${Math.round(b.coverage * 100)}%`}</td></tr>`).join('')).join('');
+  const failedRows = acc.failed_belts.slice(0, 25).map(b => `<tr class="clickable" data-action="open-belt" data-id="${b.belt_id}">
+      <td class="strong">${esc(b.tag)}</td><td>${esc(b.type)}</td><td>${hours(b.end_hour)}</td><td>${hours(b.last_inspection_hour)}</td>
+      <td>${hours(b.predicted_rul)}${b.low != null ? ` <span class="hint">(${Math.round(b.low).toLocaleString()}–${Math.round(b.high).toLocaleString()})</span>` : ''}</td>
+      <td>${hours(b.actual_rul)}</td><td>${biasText(b.error_hours)}</td>
+      <td>${b.in_interval === null ? '—' : b.in_interval ? '<span class="hit-yes">✓</span>' : '<span class="hit-no">✗</span>'}</td><td class="muted">v${b.model_id}</td></tr>`).join('');
+  const pessimistic = acc.replaced_belts.filter(b => b.too_pessimistic).length;
+  return `<div class="card">
+    <div class="card-title">🎯 Real-world accuracy</div>
+    <p class="card-desc">Each model's <strong>stored prediction at every inspection</strong> of a belt that later failed, compared with the true remaining life (failure hour − inspection hour).
+      Interval hit rate should be close to the 80% the model promises. Bias above 0 means optimistic — the risky direction.</p>
+    ${acc.models.some(a => a.low_sample) ? `<div class="notice notice-warn">⚠ Fewer than ${min} failed belts for some versions (marked ⚠). Treat those figures as anecdotes, not accuracy.</div>` : ''}
+    <div class="table-wrap"><table class="data-table">
+      <thead><tr><th>Version</th><th>Failed belts</th><th>Predictions judged</th><th>Avg error</th><th>Bias</th><th>Interval hit rate</th></tr></thead>
+      <tbody>${acc.models.map(a => `<tr><td class="strong">v${a.model_id}</td><td>${a.failed_belts}${a.low_sample ? ' ⚠' : ''}</td><td>${a.points}</td>
+        <td>± ${hours(a.mae_hours)}</td><td>${biasText(a.bias_hours)}</td>
+        <td>${a.interval_coverage === null ? '—' : `${Math.round(a.interval_coverage * 100)}%`}</td></tr>`).join('')}</tbody></table></div>
+    <div class="sub-title">By how much life was really left</div>
+    <div class="table-wrap"><table class="data-table">
+      <thead><tr><th>Version</th><th>Actual time left</th><th>Predictions</th><th>Avg error</th><th>Bias</th><th>Interval hit rate</th></tr></thead>
+      <tbody>${bucketRows}</tbody></table></div>
+    <div class="sub-title">Failed belts: the model's last prediction vs. what happened (${acc.total_failed_belts})</div>
+    <div class="table-wrap"><table class="data-table">
+      <thead><tr><th>Belt</th><th>Type</th><th>Failed at</th><th>Last inspection</th><th>Predicted left</th><th>Actually left</th><th>Error</th><th>In range</th><th>Model</th></tr></thead>
+      <tbody>${failedRows}</tbody></table></div>
+    ${acc.total_replaced_belts ? `<p class="hint">${acc.total_replaced_belts} belt(s) were replaced before failing and are <strong>not</strong> counted above${pessimistic ? `; for ${pessimistic} of them the model's range ended before the belt's proven survival time (the model was too cautious)` : ''}.</p>` : ''}
+  </div>`;
 }
 
 function biasText(b) {
@@ -984,7 +1068,116 @@ async function addUser() {
 // ═══════════════════════════════════════════════════════════════════════════
 // Event delegation
 // ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
+// BULK IMPORT (fleet page)
+// ═══════════════════════════════════════════════════════════════════════════
+function openImport() {
+  state.importReport = null;
+  const typeOpts = state.types.map(t => `<option value="${t.id}">${esc(t.name)}</option>`).join('');
+  $('#import-card').innerHTML = `
+    <div class="card import-card">
+      <div class="card-title">⬆ Import from CSV <button class="btn-icon-only" data-action="close-import" title="Close">✕</button></div>
+      <p class="card-desc">Load many belts or inspections at once. The file is <strong>checked first</strong> and nothing is saved until you confirm. If any row has an error, nothing is imported — fix the file and check it again.</p>
+      <div class="form-row cols-3">
+        <div class="form-group"><label>What are you importing?</label>
+          <select id="import-kind"><option value="inspections">Inspections (readings for registered belts)</option><option value="belts">Belts (register many belts)</option></select></div>
+        <div class="form-group"><label>CSV file</label><input type="file" id="import-file" accept=".csv" /></div>
+        <div class="form-group" id="import-type-group"><label>Default belt type</label>
+          <select id="import-default-type"><option value="">Use the file's type column</option>${typeOpts}</select></div>
+      </div>
+      <div class="hint" id="import-hint"></div>
+      <div class="action-row">
+        <a class="btn btn-ghost" id="import-template" href="/api/import/template/inspections" download>⬇ Download template</a>
+        <button class="btn btn-outline" data-action="import-check">Check file</button>
+      </div>
+      <div id="import-result"></div>
+    </div>`;
+  $('#import-kind').addEventListener('change', syncImportKind);
+  $('#import-file').addEventListener('change', () => { state.importReport = null; $('#import-result').innerHTML = ''; });
+  syncImportKind();
+  $('#import-card').scrollIntoView({ behavior: 'smooth' });
+}
+
+function syncImportKind() {
+  const kind = $('#import-kind').value;
+  $('#import-template').href = `/api/import/template/${kind}`;
+  $('#import-type-group').classList.toggle('hidden', kind !== 'belts');
+  $('#import-hint').innerHTML = kind === 'inspections'
+    ? 'One row per belt per inspection: <code>belt_tag</code>, <code>hour</code> and any measurements. Belts must already be registered and in service. Use the units in the template (°C, mm, %). Leave a cell empty if it was not measured — never 0.'
+    : 'One row per belt: <code>belt_tag</code>, <code>belt_type</code> (name, section code or alias), optional location, installed date (2025-01-31) and drive details. Tags that already exist are left unchanged.';
+  state.importReport = null;
+  $('#import-result').innerHTML = '';
+}
+
+async function runImport(dryRun) {
+  const file = $('#import-file').files[0];
+  if (!file) { toast('Choose a CSV file first.', 'error'); return; }
+  const kind = $('#import-kind').value;
+  const form = new FormData();
+  form.append('file', file);
+  form.append('dry_run', dryRun ? 'true' : 'false');
+  const def = $('#import-default-type').value;
+  if (kind === 'belts' && def) form.append('default_belt_type_id', def);
+  showOverlay(dryRun ? 'Checking file…' : 'Importing…', file.name);
+  let report;
+  try { report = await api(`/api/import/${kind}`, { method: 'POST', form }); }
+  finally { hideOverlay(); }
+  state.importReport = { kind, file: file.name, report };
+  const r = report;
+  if (r.committed) {
+    $('#import-result').innerHTML = `<div class="notice notice-ok">✓ Imported ${r.to_create} new${r.to_update ? ` and updated ${r.to_update}` : ''} ${kind === 'belts' ? 'belt(s)' : `inspection(s) across ${r.belts_affected} belt(s)`}.</div>`;
+    toast('Import complete.', 'success');
+    state.fleet = await api('/api/belts');
+    drawFleetSummary();
+    drawFleetTable();
+    return;
+  }
+  renderImportReport(r);
+}
+
+function renderImportReport(r) {
+  const cols = r.columns.map(c => `<tr class="${c.field ? '' : 'col-ignored'}"><td class="strong">${esc(c.source)}</td>
+    <td>${c.field ? `${esc(state.fields[c.field]?.label || c.field.replace(/^__|__$/g, '').replace(/_/g, ' '))}${c.unit ? ` <span class="unit">(${esc(c.unit)})</span>` : ''}` : '<span class="tier tier-amber">Not recognised — will not be used</span>'}</td></tr>`).join('');
+  const unrecognised = r.ignored_columns.length;
+  const errors = r.errors.map(e => `<tr><td>${e.row}</td><td>${esc(e.message)}</td></tr>`).join('');
+  const preview = r.preview.length ? `<div class="sub-title">First rows that will be imported</div>
+    <div class="table-wrap"><table class="data-table"><tbody>${r.preview.map(p => `<tr><td>row ${p.row}</td><td class="strong">${esc(p.tag)}</td>
+      <td class="wrap small">${p.hour !== undefined ? `${hours(p.hour)} · ${Object.entries(p.readings).map(([k, v]) => `${esc(state.fields[k]?.label || k)} ${fmt(v)}`).join(', ')}` : `${esc(p.type)}${p.location ? ` · ${esc(p.location)}` : ''}`}</td></tr>`).join('')}</tbody></table></div>` : '';
+  const ready = !r.error_count && (r.to_create + r.to_update) > 0;
+  $('#import-result').innerHTML = `
+    <div class="import-summary">
+      <div class="summary-tile"><div class="summary-num">${r.rows.toLocaleString()}</div><div class="summary-label">Rows in file</div></div>
+      <div class="summary-tile tile-green"><div class="summary-num">${r.to_create}</div><div class="summary-label">To add</div></div>
+      <div class="summary-tile tile-amber"><div class="summary-num">${r.to_update}</div><div class="summary-label">To replace</div></div>
+      <div class="summary-tile ${r.error_count ? 'tile-red' : ''}"><div class="summary-num">${r.error_count}</div><div class="summary-label">Errors</div></div>
+    </div>
+    ${r.warnings.map(w => `<div class="notice notice-warn">${esc(w)}</div>`).join('')}
+    ${unrecognised ? `<div class="notice notice-warn"><strong>${unrecognised} column(s) were not recognised and will be ignored:</strong> ${r.ignored_columns.map(esc).join(', ')}. If one of them is a measurement you want, rename it to match the template.</div>` : ''}
+    ${r.error_count ? `<div class="sub-title">Errors${r.error_count > r.errors.length ? ` (first ${r.errors.length} of ${r.error_count})` : ''}</div>
+      <div class="table-wrap import-errors"><table class="data-table"><thead><tr><th>Row</th><th>Problem</th></tr></thead><tbody>${errors}</tbody></table></div>` : ''}
+    <div class="sub-title">How your columns were read</div>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>Your column</th><th>Used as</th></tr></thead><tbody>${cols}</tbody></table></div>
+    ${preview}
+    <div class="action-row">
+      <button class="btn btn-primary btn-large" data-action="import-commit" ${ready ? '' : 'disabled'}>Import ${(r.to_create + r.to_update).toLocaleString()} ${state.importReport.kind === 'belts' ? 'belt(s)' : 'inspection(s)'}</button>
+    </div>`;
+}
+
 const ACTIONS = {
+  'open-import': openImport,
+  'close-import': () => { $('#import-card').innerHTML = ''; state.importReport = null; },
+  'import-check': () => runImport(true),
+  'import-commit': async () => {
+    const r = state.importReport?.report;
+    if (!r || r.error_count) return;
+    if (!confirm(`Import ${r.to_create + r.to_update} ${state.importReport.kind === 'belts' ? 'belt(s)' : 'inspection(s)'} from ${state.importReport.file}?${r.to_update ? `\n\n${r.to_update} existing inspection(s) will be replaced.` : ''}`)) return;
+    await runImport(false);
+  },
+  'dataset-from-fleet': async () => {
+    const res = await api('/api/datasets/from-fleet', { method: 'POST' });
+    toast(`Created ${res.filename}: ${res.belts} belts (${res.failed_belts} failed, ${res.replaced_belts} replaced, ${res.in_service_belts} in service).`, 'success');
+    await renderData();
+  },
   'logout': async () => { await api('/api/auth/logout', { method: 'POST' }).catch(() => {}); location.hash = ''; showLogin(); },
   'open-belt': el => { location.hash = `belt/${el.dataset.id}`; },
   'new-belt': () => { state.editBelt = null; $('#belt-form-card').innerHTML = beltFormHtml(null); $('#bf-tag').focus(); },

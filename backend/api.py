@@ -27,12 +27,13 @@ from typing import Dict, List, Literal, Optional
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import pandas as pd
-from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 import auth
+import fleet
 import model_registry as reg
 import schema_mapper as sm
 from config import (COOKIE_SECURE, DATASETS_DIR, DEV_MODE, FRONTEND_DIR, GENERATOR_SCRIPT,
@@ -338,6 +339,13 @@ def belt_detail(belt_id: int, user: dict = Depends(auth.current_user)):
     model_id = active.get(belt["belt_type_id"])
     preds = reg.predict_inspections(belt, btype, [{"hour": i["hour"], "readings": i["readings"]} for i in insps], model_id)
     model = reg.get_model(model_id) if model_id else None
+    # For belts that failed / were replaced: what actually happened after each inspection, next to the
+    # prediction stored at the time (planners see how far to trust the model).
+    for i in insps:
+        truth = fleet.actual_remaining(belt, i["hour"])
+        i["actual_rul"], i["actual_kind"] = (truth["actual_rul"], truth["kind"]) if truth else (None, None)
+        i["in_interval"] = (None if truth is None or truth["kind"] != "failed" else
+                            fleet.interval_hit(i.get("predicted_low"), i.get("predicted_high"), truth["actual_rul"]))
     return {
         "belt": belt, "belt_type": btype, "inspections": insps, "predictions": preds,
         "model": {"id": model["id"], "feature_cols": model["info"]["feature_cols"],
@@ -363,12 +371,7 @@ def add_inspection(belt_id: int, body: InspectionBody, user: dict = Depends(auth
         pred = reg.predict_inspections(belt, btype, history, model_id)[[h["hour"] for h in history].index(body.hour)]
         # Store the prediction made at inspection time (model version included) - this is the
         # audit trail for later comparing predictions with the belt's actual failure.
-        conn.execute(
-            "INSERT INTO inspections (belt_id, hour, readings_json, predicted_rul, health_score, model_id, created_at, created_by) "
-            "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(belt_id, hour) DO UPDATE SET readings_json=excluded.readings_json, "
-            "predicted_rul=excluded.predicted_rul, health_score=excluded.health_score, model_id=excluded.model_id, "
-            "created_at=excluded.created_at, created_by=excluded.created_by",
-            (belt_id, body.hour, json.dumps(readings), pred["rul_hours"], pred["health_score"], model_id, now_iso(), user["id"]))
+        fleet.store_inspection(conn, belt_id, body.hour, readings, pred, model_id, user["id"])
     return belt_detail(belt_id, user)
 
 
@@ -385,10 +388,57 @@ def end_of_life(belt_id: int, body: EndOfLifeBody, user: dict = Depends(auth.cur
         bad_request("Enter the operating hour at which the belt failed / was replaced.")
     with get_conn() as conn:
         _belt(conn, belt_id)
+        last = conn.execute("SELECT MAX(hour) FROM inspections WHERE belt_id = ?", (belt_id,)).fetchone()[0]
+        if body.status != "in_service" and last is not None and body.hour < last:
+            bad_request(f"The belt was inspected at {last:g} h, so it cannot have failed / been replaced earlier ({body.hour:g} h). "
+                        "Check the hour, or delete the later inspection.")
         conn.execute("UPDATE belts SET status=?, end_hour=?, end_reason=? WHERE id=?",
                      (body.status, None if body.status == "in_service" else body.hour,
                       None if body.status == "in_service" else body.reason, belt_id))
     return belt_detail(belt_id, user)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Bulk import (engineer + planner)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/import/template/{kind}")
+def import_template(kind: str, user: dict = Depends(auth.current_user)):
+    if kind not in ("belts", "inspections"):
+        raise HTTPException(status_code=404, detail="Unknown template.")
+    return Response(fleet.template_csv(kind), media_type="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="{kind}_template.csv"'})
+
+
+@app.post("/api/import/{kind}")
+def import_records(kind: str, file: UploadFile = File(...), dry_run: str = Form("true"),
+                   default_belt_type_id: Optional[int] = Form(None), user: dict = Depends(auth.current_user)):
+    # Plain `def` on purpose: FastAPI runs it in a worker thread, so a big import (one prediction pass
+    # per belt) does not block other requests.
+    if kind not in ("belts", "inspections"):
+        raise HTTPException(status_code=404, detail="Unknown import kind.")
+    data = file.file.read(MAX_UPLOAD_MB * 1_048_576 + 1)
+    if len(data) > MAX_UPLOAD_MB * 1_048_576:
+        raise HTTPException(status_code=413, detail=f"File larger than {MAX_UPLOAD_MB} MB.")
+    with get_conn() as conn:
+        # Validation and the commit run in ONE transaction: a failure rolls the whole import back.
+        return fleet.import_csv(conn, kind, data, dry_run.strip().lower() != "false", user["id"], default_belt_type_id)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Real-world accuracy & fleet -> dataset (engineer)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/accuracy")
+def accuracy(user: dict = Depends(auth.require_engineer)):
+    with get_conn() as conn:
+        return fleet.accuracy_report(conn)
+
+
+@app.post("/api/datasets/from-fleet")
+def dataset_from_fleet(user: dict = Depends(auth.require_engineer)):
+    with get_conn() as conn:
+        return fleet.export_fleet_dataset(conn, DATASETS_DIR)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

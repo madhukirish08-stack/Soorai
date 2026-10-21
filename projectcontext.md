@@ -28,7 +28,9 @@ Dev mode enables synthetic data generation, `/docs`, and non-Secure cookies. Nev
 | `backend/auth.py`, `config.py`, `manage.py` | Scrypt passwords + cookie sessions; env/.env settings and paths; admin CLI. |
 | `frontend/app.js` | Single-file SPA: hash routing, one `render*` function per view (fleet, belt, types, data, models, users), a `state` object, event delegation via `data-action`. |
 | `training/generate_synthetic_vbelts.py` | Physics-inspired demo data, NOT calibrated to real belts. `--censor-frac` truncates belts' logs. |
+| `backend/fleet.py` | Phase 4: `store_inspection` (the ONE writer of an inspection + its stored prediction), bulk CSV import (belts/inspections, validate-first, all-or-nothing), `accuracy_report` (backtest), `actual_remaining`, `export_fleet_dataset`. |
 | `tests/e2e_flow.py` | In-process FastAPI TestClient flow on a temp instance dir. |
+| `tests/test_phase4.py` | Phase 4 regression: import validation/commit, backtest, ground truth on belt pages, fleet->dataset->train, DB migration. |
 
 ## Data flow
 1. Upload CSV -> `schema/propose` -> engineer approves mapping (saved as `instance/mappings/<file>.mapping.json`, keyed by column signature). Fully canonical files skip the review.
@@ -60,7 +62,14 @@ Dev mode enables synthetic data generation, `/docs`, and non-Secure cookies. Nev
 ## Conventions
 - Comment any custom fix with the reason and a warning not to revert it.
 - Prefer removing code that causes unwanted behaviour over patching around it.
-- Run `node --check frontend/app.js` and `python tests/e2e_flow.py <csv>` before declaring done.
+- Run `node --check frontend/app.js`, `python tests/e2e_flow.py <csv>` and `python tests/test_phase4.py` before declaring done.
+
+## Phase 4 invariants (fleet loop)
+- Every inspection row stores the prediction made AT THAT TIME: `predicted_rul` (median), `predicted_low/high` (80 % interval), `model_id`. Written only through `fleet.store_inspection`, by both manual entry and bulk import. The backtest uses these stored values, never a re-prediction. DB columns added after v1 go in `db.MIGRATIONS` (idempotent `ALTER TABLE` in `init_db`).
+- **Bulk import is all-or-nothing**: any row error blocks the commit; `dry_run` (default true in the API) writes nothing; validation and commit share one transaction. Numbers must be plain (`1,800` is rejected, never guessed). Unrecognised columns are ignored but reported loudly. Inspection files may not carry belt-level (static) columns and vice versa. Header aliases live in `fleet.py` (`TAG_ALIASES`, `HOUR_ALIASES`, `FIELD_ALIASES`); aliases never imply a unit conversion.
+- **Accuracy counts only belts with status `failed`.** `replaced` belts are right-censored: the true RUL is only a lower bound, so they are reported separately (`too_pessimistic` = the model's interval ended before the proven survival time). Under `MIN_FAILED_FOR_CONFIDENCE` (10) failed belts the UI flags figures as anecdotal. Bias = predicted - actual (positive = optimistic).
+- `end_of_life` refuses an end hour earlier than the belt's last inspection.
+- `export_fleet_dataset` writes a fully canonical CSV (no mapping step needed). `failure_hour` is filled ONLY for failed belts; replaced and in-service belts stay blank so they are censored. `x_*` extra readings are not exported. Replaced belts whose last reading is past a failure limit are still treated by `derive_rul` as (estimated) failures - correct, and flagged in `rul_source`.
 
 ## Roadmap (from the project owner)
-Phases 1-3 done (auth, persistence, belt types with own limits, model registry with per-type activation and comparison). Phase 5 = survival analysis (this work). Possible next: calibrate the interval per belt/horizon, treat early replacement as informative censoring, compare predictions against recorded actual failures per model version.
+Phases 1-5 done (auth, persistence, belt types with own limits, model registry, bulk import + real-failure backtest + fleet->dataset, survival analysis). Possible next: calibrate the interval per belt/horizon using the real-failure backtest (conformal-style), treat early replacement as informative censoring, per-belt-type accuracy breakdown, scheduled inspection reminders.

@@ -17,8 +17,17 @@ Remaining-useful-life (RUL) prediction and health tracking for industrial **powe
 1. **Engineer:** confirms the failure limits of each **belt type**. The seeded limits are placeholders and are flagged until someone confirms them.
 2. **Engineer:** uploads plant data (any CSV layout) under **Data & Training**. Gemini proposes how the columns map to the model's fields, including unit conversions. The engineer reviews the proposal, sees any warnings, and approves it.
 3. **Engineer:** trains a new model version, then compares it with earlier versions on the **same held-out belts** and **activates** it for its belt types. Older versions stay available for one-click rollback.
-4. **Planner:** opens **Fleet**, which lists the most urgent belts first. They record an inspection and get RUL, health and the measurement closest to its limit.
+4. **Planner:** opens **Fleet**, which lists the most urgent belts first. They record an inspection (or **import many from a CSV**) and get RUL, health and the measurement closest to its limit.
 5. **Planner:** when a belt fails or is replaced, records the hour and reason. This is the ground truth that improves the next model version.
+6. **Engineer:** checks **Models → Real-world accuracy**: for every belt that actually failed, what each model version predicted at each inspection vs. what happened. When enough belts have ended, they click **Create from fleet records** (Data & Training) to turn the fleet's own history into a training dataset and train the next version on it.
+
+### Bulk import (Fleet → Import from CSV)
+Planners and engineers can load belts and inspections from a CSV. Download the template from the import panel. The file is **checked first**: every column is shown with the field and unit it was read as, unrecognised columns are called out, and each bad row is listed with the reason. **Nothing is saved until the file has no errors and you confirm**; re-importing a corrected file is safe (an inspection is identified by belt + hour and is replaced, not duplicated). Each imported inspection gets a stored prediction (model version and interval), exactly like one entered by hand.
+
+### How the accuracy figures are judged
+- Only belts recorded as **failed** count. A belt that was **replaced** only proves it lasted *at least* that long, so it is listed separately and never scored as a miss.
+- The prediction judged is the one **stored at inspection time**, never a re-prediction with today's model.
+- Figures based on fewer than 10 failed belts are flagged as anecdotal.
 
 ---
 
@@ -87,6 +96,7 @@ Set `BELT_RUL_DEV_MODE=1` in `.env`. This enables:
 ```bash
 python training/generate_synthetic_vbelts.py --belts 300 --censor-frac 0.3 --output synth.csv
 python tests/e2e_flow.py synth.csv      # uses a throw-away instance folder; prints held-out metrics
+python tests/test_phase4.py             # bulk import, real-failure backtest, fleet -> dataset, DB migration
 ```
 Held-out metrics reported per model version (Models → Details): MAE, RMSE, R², bias, near-failure MAE, **concordance index** (does the model rank belts by remaining life correctly; 0.5 = random) and **80 % interval coverage** (should be about 80 %). Error figures use belts with a known end of life only.
 
