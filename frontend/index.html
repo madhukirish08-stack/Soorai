@@ -1,341 +1,320 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Belt RUL Predictor — Remaining Useful Life Intelligence</title>
-  <meta name="description" content="AI-powered Remaining Useful Life prediction for conveyor belts. Input inspection readings and get real-time RUL forecasts with growing confidence." />
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css" />
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>BeltRUL Studio — Predictive Maintenance Intelligence</title>
+  <meta name="description" content="AI-powered Remaining Useful Life prediction for industrial belts. Train models, inspect belts, forecast RUL."/>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="style.css"/>
 </head>
 <body>
-  <!-- ═══════════════════ HEADER ═══════════════════ -->
-  <header class="header">
-    <div class="header-inner">
-      <div class="logo">
-        <span class="logo-icon">⚙</span>
-        <div>
-          <div class="logo-name">Belt<span class="logo-accent">RUL</span></div>
-          <div class="logo-sub">Remaining Useful Life Intelligence</div>
-        </div>
-      </div>
-      <div class="header-status">
-        <div id="model-status" class="status-badge status-idle">
-          <span class="status-dot"></span>
-          <span id="model-status-text">No model loaded</span>
-        </div>
+
+<!-- ═══ HEADER ═══ -->
+<header class="header">
+  <div class="header-inner">
+    <div class="logo">
+      <div class="logo-gear">&#9881;</div>
+      <div>
+        <div class="logo-name">Belt<span class="logo-accent">RUL</span><span class="badge-studio">Studio</span></div>
+        <div class="logo-sub">Industrial Belt Predictive Maintenance</div>
       </div>
     </div>
-  </header>
-
-  <!-- ═══════════════════ STEPPER NAV ═══════════════════ -->
-  <nav class="stepper">
-    <div class="stepper-inner">
-      <div class="step active" id="step-nav-1" onclick="goToStep(1)">
-        <div class="step-num">1</div>
-        <div class="step-label">Dataset</div>
-      </div>
-      <div class="step-line"></div>
-      <div class="step" id="step-nav-2">
-        <div class="step-num">2</div>
-        <div class="step-label">Belt Setup</div>
-      </div>
-      <div class="step-line"></div>
-      <div class="step" id="step-nav-3">
-        <div class="step-num">3</div>
-        <div class="step-label">Inspect & Results</div>
+    <div class="header-right">
+      <div id="model-status" class="status-badge status-idle">
+        <span class="status-dot"></span>
+        <span id="model-status-text">No model loaded</span>
       </div>
     </div>
-  </nav>
+  </div>
+</header>
 
-  <!-- ═══════════════════ MAIN CONTENT ═══════════════════ -->
-  <main class="main">
+<!-- ═══ VIEWS (single-page, only one shown at a time) ═══ -->
+<main>
 
-    <!-- ───────── STEP 1: DATASET ───────── -->
-    <section class="panel" id="panel-1">
-      <div class="panel-header">
-        <div class="panel-icon">🗄</div>
+  <!-- ════════════════════════════════════════════════
+       VIEW 1: BELT HUB
+       User picks a belt → sees models + can predict or train
+       ════════════════════════════════════════════════ -->
+  <div class="view active" id="view-hub">
+    <div class="view-inner">
+
+      <div class="page-head">
         <div>
-          <h1 class="panel-title">Select Training Dataset</h1>
-          <p class="panel-subtitle">Choose an existing dataset or upload a new CSV to train the RUL model.</p>
+          <h1 class="page-title">Belt Hub</h1>
+          <p class="page-sub">Select your belt type to get started</p>
         </div>
       </div>
 
-      <!-- Generate fresh data -->
-      <div class="card generate-card">
-        <div class="card-title">
-          <span class="card-icon">⚡</span> Generate Fresh Synthetic Data
-        </div>
-        <p class="card-desc">Run <code>training_data_5_oct.py</code> to generate a new physics-informed dataset.</p>
-        <div class="form-row">
-          <div class="form-group">
-            <label>Number of Belts</label>
-            <input type="number" id="gen-belts" value="300" min="50" max="2000" />
+      <!-- Belt type picker -->
+      <div class="section-label">
+        <span class="sl-icon">&#127991;</span> Belt Category
+        <button class="btn btn-xs btn-ghost" onclick="openAddBeltModal()" style="margin-left:auto">+ Add Custom</button>
+      </div>
+      <div class="belt-grid" id="belt-grid">
+        <div class="belt-card-skeleton"></div>
+        <div class="belt-card-skeleton"></div>
+        <div class="belt-card-skeleton"></div>
+        <div class="belt-card-skeleton"></div>
+      </div>
+
+      <!-- Selected belt detail + action bar (hidden until belt picked) -->
+      <div id="belt-detail-section" class="belt-detail-section hidden">
+
+        <!-- Belt profile strip -->
+        <div class="belt-strip" id="belt-strip">
+          <div class="bs-icon" id="bs-icon">&#9881;</div>
+          <div class="bs-info">
+            <div class="bs-name" id="bs-name">—</div>
+            <div class="bs-geom" id="bs-geom">—</div>
           </div>
-          <div class="form-group">
-            <label>Max Hours</label>
-            <input type="number" id="gen-max-hours" value="20000" min="5000" max="50000" step="1000" />
+          <div class="bs-stats">
+            <div class="bs-stat"><span class="bs-stat-l">Hardness</span><span class="bs-stat-v" id="bs-hardness">—</span></div>
+            <div class="bs-stat"><span class="bs-stat-l">Thickness</span><span class="bs-stat-v" id="bs-thickness">—</span></div>
+            <div class="bs-stat"><span class="bs-stat-l">Tensile</span><span class="bs-stat-v" id="bs-tensile">—</span></div>
           </div>
-          <div class="form-group">
-            <label>Step (hrs)</label>
-            <input type="number" id="gen-step" value="100" min="10" max="500" />
+          <div class="bs-risks" id="bs-risks"></div>
+        </div>
+
+        <!-- Two action cards side by side -->
+        <div class="hub-actions">
+
+          <!-- Predict RUL (uses existing champion) -->
+          <div class="action-card action-predict" id="action-predict-card">
+            <div class="ac-header">
+              <span class="ac-icon">&#128302;</span>
+              <div>
+                <div class="ac-title">Predict RUL</div>
+                <div class="ac-sub">Use active champion model</div>
+              </div>
+              <div class="ac-model-badge hidden" id="champion-badge">
+                <span class="champ-algo" id="champ-algo-name">—</span>
+                <span class="champ-r2" id="champ-r2-val">—</span>
+              </div>
+            </div>
+            <p class="ac-desc" id="predict-desc">Load a champion model to start predicting belt remaining useful life from inspection readings.</p>
+            <div class="ac-no-model hidden" id="no-model-notice">
+              <span>&#9888;</span> No trained model for this belt type yet.
+            </div>
+            <button class="btn btn-primary btn-block" id="btn-go-predict" onclick="goPredict()" disabled>
+              &#128302; Inspect &amp; Forecast RUL &#8594;
+            </button>
           </div>
-          <div class="form-group">
-            <label>Random Seed</label>
-            <input type="number" id="gen-seed" value="42" />
+
+          <!-- Train Model -->
+          <div class="action-card action-train">
+            <div class="ac-header">
+              <span class="ac-icon">&#128640;</span>
+              <div>
+                <div class="ac-title">Train New Model</div>
+                <div class="ac-sub">Build &amp; compare candidate model</div>
+              </div>
+            </div>
+            <p class="ac-desc">Upload or select a telemetry dataset, choose an algorithm, and train a model for this belt type. Results open the Comparison Studio.</p>
+            <button class="btn btn-outline btn-block" onclick="showView('view-train')">
+              &#128640; Go to Training &#8594;
+            </button>
           </div>
-        </div>
-        <button class="btn btn-outline" id="btn-generate" onclick="generateData()">
-          <span class="btn-icon">⚡</span> Generate Dataset
-        </button>
-        <div id="gen-log" class="log-box hidden"></div>
-      </div>
 
-      <!-- Available datasets -->
-      <div class="card">
-        <div class="card-title">
-          <span class="card-icon">📂</span> Available Datasets
-          <button class="btn-icon-only" onclick="loadDatasets()" title="Refresh">↻</button>
         </div>
-        <div id="dataset-list" class="dataset-list">
-          <div class="empty-state">Loading datasets…</div>
-        </div>
-      </div>
 
-      <!-- Upload new CSV -->
-      <div class="card upload-card">
-        <div class="card-title"><span class="card-icon">⬆</span> Upload New CSV</div>
-        <label class="upload-drop" id="upload-drop">
-          <input type="file" id="upload-file" accept=".csv" onchange="uploadDataset()" hidden />
-          <div class="upload-icon">📄</div>
-          <div class="upload-text">Drag & drop a CSV file here or <span class="link">click to browse</span></div>
-          <div class="upload-hint">Any belt telemetry CSV — columns are mapped to the model schema in the next step</div>
-        </label>
-        <div id="upload-status" class="hidden"></div>
-      </div>
+        <!-- Model zoo for this belt (collapsible) -->
+        <details class="zoo-details" id="zoo-details">
+          <summary class="zoo-summary">
+            <span>&#129504; Trained Models for this Belt</span>
+            <span class="model-count-badge" id="zoo-count-badge">0 models</span>
+          </summary>
+          <div class="model-zoo-list" id="model-zoo-list">
+            <div class="empty-state">Loading models…</div>
+          </div>
+        </details>
 
-      <!-- Column mapping review (human-in-the-loop: LLM proposes, user approves) -->
-      <div class="card mapping-card hidden" id="mapping-card">
-        <div class="card-title"><span class="card-icon">🧭</span> Review Column Mapping
-          <span class="mapping-source" id="mapping-source"></span>
-        </div>
-        <p class="card-desc">
-          Each column of your dataset is matched to a field the model understands. Check every row —
-          especially low-confidence ones and unit conversions (<code>model value = raw × scale + offset</code>).
-          Nothing is used for training until you approve.
-        </p>
-        <div id="mapping-warnings"></div>
-        <div class="table-wrap">
-          <table class="inspection-table mapping-table">
-            <thead>
-              <tr><th>Your column</th><th>Sample values</th><th>Maps to</th><th>Confidence</th><th>Scale</th><th>Offset</th><th>Why</th></tr>
-            </thead>
-            <tbody id="mapping-tbody"></tbody>
-          </table>
-        </div>
-        <div id="mapping-result"></div>
-        <div class="action-row">
-          <button class="btn btn-ghost" onclick="closeMapping()">Cancel</button>
-          <button class="btn btn-primary" id="btn-approve-mapping" onclick="approveMapping()">✓ Approve Mapping</button>
-        </div>
-      </div>
+      </div><!-- /belt-detail-section -->
 
-      <!-- Train model button -->
-      <div class="action-row">
-        <div id="selected-dataset-display" class="selected-info">No dataset selected</div>
-        <button class="btn btn-outline" id="btn-map" onclick="openMapping()" disabled>🧭 Review Column Mapping</button>
-        <button class="btn btn-primary btn-large" id="btn-train" onclick="trainModel()" disabled>
-          <span class="btn-spinner hidden" id="train-spinner">⟳</span>
-          Train Model on Selected Dataset
-        </button>
-      </div>
+    </div>
+  </div>
 
-      <div id="train-result" class="train-result hidden"></div>
-    </section>
+  <!-- ════════════════════════════════════════════════
+       VIEW 2: BELT SETUP (before predict)
+       User configures belt tag + properties
+       ════════════════════════════════════════════════ -->
+  <div class="view" id="view-setup">
+    <div class="view-inner">
 
-    <!-- ───────── STEP 2: BELT SETUP ───────── -->
-    <section class="panel hidden" id="panel-2">
-      <div class="panel-header">
-        <div class="panel-icon">🔩</div>
+      <div class="page-head">
+        <button class="btn-back" onclick="showView('view-hub')">&#8592; Back to Hub</button>
         <div>
-          <h2 class="panel-title">New Belt Configuration</h2>
-          <p class="panel-subtitle">Enter the static belt properties once. Operating conditions will be entered per inspection.</p>
+          <h2 class="page-title">Belt Asset Setup</h2>
+          <p class="page-sub">Configure your belt's static properties before inspection</p>
         </div>
       </div>
 
+      <!-- Active belt chip -->
+      <div class="active-belt-chip" id="setup-belt-chip">
+        <span id="setup-chip-icon">&#9881;</span>
+        <span id="setup-chip-name">—</span>
+      </div>
+
       <div class="card">
-        <div class="card-title"><span class="card-icon">🏷</span> Belt Identity</div>
-        <div class="form-row">
-          <div class="form-group full-width">
-            <label>Belt Name / ID</label>
-            <input type="text" id="belt-name" placeholder="e.g. BLT-TEST-001" />
+        <div class="card-title"><span class="card-icon">&#127991;</span> Belt Identity</div>
+        <div class="form-row cols-2">
+          <div class="form-group">
+            <label>Belt Tag ID</label>
+            <input type="text" id="belt-name" placeholder="e.g. BLT-MINE-042"/>
+          </div>
+          <div class="form-group">
+            <label>Belt Profile</label>
+            <select id="step2-belt-type" class="select-field" onchange="applyBeltTypePresetToInputs(this.value)"></select>
           </div>
         </div>
       </div>
 
       <div class="card">
-        <div class="card-title"><span class="card-icon">🧱</span> Static Material Properties</div>
-        <p class="card-desc">These are fixed properties of the belt measured at manufacture time.</p>
+        <div class="card-title-row">
+          <div class="card-title"><span class="card-icon">&#129395;</span> Material Properties</div>
+          <span class="preset-badge" id="preset-badge">Preset Applied</span>
+        </div>
+        <p class="card-desc">These are constant — set once per belt asset, not per inspection.</p>
         <div class="form-row cols-3">
           <div class="form-group">
             <label>Rubber Hardness <span class="unit">(Shore A)</span></label>
-            <input type="number" id="hardness" value="65" min="40" max="90" step="0.5" />
-            <span class="hint">Typical: 55–75</span>
+            <input type="number" id="hardness" value="65" min="40" max="95" step="0.5"/>
           </div>
           <div class="form-group">
             <label>Belt Thickness <span class="unit">(mm)</span></label>
-            <input type="number" id="thickness" value="15" min="8" max="30" step="0.5" />
-            <span class="hint">Typical: 12–20 mm</span>
+            <input type="number" id="thickness" value="15" min="2" max="40" step="0.5"/>
           </div>
           <div class="form-group">
             <label>Tensile Strength <span class="unit">(kN/m)</span></label>
-            <input type="number" id="tensile" value="1000" min="600" max="1500" step="10" />
-            <span class="hint">Typical: 800–1200 kN/m</span>
+            <input type="number" id="tensile" value="1000" min="200" max="4000" step="10"/>
           </div>
         </div>
       </div>
 
       <div class="action-row">
-        <button class="btn btn-ghost" onclick="goToStep(1)">← Back</button>
+        <button class="btn btn-ghost" onclick="showView('view-hub')">Cancel</button>
         <button class="btn btn-primary btn-large" onclick="startInspections()">
-          Start Inspections →
+          Start Inspections &#8594;
         </button>
       </div>
-    </section>
 
-    <!-- ───────── STEP 3: INSPECTIONS ───────── -->
-    <section class="panel hidden" id="panel-3">
-      <div class="panel-header">
-        <div class="panel-icon">🔬</div>
+    </div>
+  </div>
+
+  <!-- ════════════════════════════════════════════════
+       VIEW 3: INSPECT & FORECAST
+       Per-inspection readings → RUL prediction
+       ════════════════════════════════════════════════ -->
+  <div class="view" id="view-inspect">
+    <div class="view-inner view-wide">
+
+      <div class="page-head">
+        <button class="btn-back" onclick="showView('view-setup')">&#8592; Back</button>
         <div>
-          <h2 class="panel-title">Hour-by-Hour Inspection</h2>
-          <p class="panel-subtitle">Enter operating conditions and degradation readings for each inspection point. Confidence grows with each reading.</p>
+          <h2 class="page-title">Inspect &amp; Forecast RUL</h2>
+          <p class="page-sub">Enter sensor readings — predictions build confidence with each cycle</p>
         </div>
       </div>
 
       <!-- Belt info bar -->
       <div class="belt-info-bar">
-        <div class="belt-info-item">
-          <span class="belt-info-label">Belt ID</span>
-          <span class="belt-info-value" id="insp-belt-name">—</span>
-        </div>
-        <div class="belt-info-item">
-          <span class="belt-info-label">Hardness</span>
-          <span class="belt-info-value" id="insp-hardness">—</span>
-        </div>
-        <div class="belt-info-item">
-          <span class="belt-info-label">Thickness</span>
-          <span class="belt-info-value" id="insp-thickness">—</span>
-        </div>
-        <div class="belt-info-item">
-          <span class="belt-info-label">Tensile Str.</span>
-          <span class="belt-info-value" id="insp-tensile">—</span>
-        </div>
-        <div class="belt-info-item">
-          <span class="belt-info-label">Inspections</span>
-          <span class="belt-info-value accent" id="insp-count">0</span>
-        </div>
+        <div class="belt-info-item"><span class="belt-info-label">Belt ID</span><span class="belt-info-value" id="insp-belt-name">—</span></div>
+        <div class="belt-info-item"><span class="belt-info-label">Type</span><span class="belt-info-value" id="insp-type-badge">—</span></div>
+        <div class="belt-info-item"><span class="belt-info-label">Hardness</span><span class="belt-info-value" id="insp-hardness">—</span></div>
+        <div class="belt-info-item"><span class="belt-info-label">Thickness</span><span class="belt-info-value" id="insp-thickness">—</span></div>
+        <div class="belt-info-item"><span class="belt-info-label">Tensile</span><span class="belt-info-value" id="insp-tensile">—</span></div>
+        <div class="belt-info-item"><span class="belt-info-label">Inspections</span><span class="belt-info-value accent" id="insp-count">0</span></div>
       </div>
 
       <div class="inspection-layout">
-        <!-- Left: form -->
+        <!-- Form column -->
         <div class="inspection-form-col">
+
           <div class="card">
-            <div class="card-title"><span class="card-icon">⏱</span> Inspection Time</div>
-            <div class="form-row">
-              <div class="form-group full-width">
-                <label>Current Hour of Operation</label>
-                <input type="number" id="insp-hour" value="0" min="0" max="30000" step="100" />
-              </div>
+            <div class="card-title"><span class="card-icon">&#8987;</span> Run Hours</div>
+            <div class="form-group">
+              <label>Cumulative Operating Hours</label>
+              <input type="number" id="insp-hour" value="0" min="0" max="50000" step="100"/>
             </div>
           </div>
 
           <div class="card">
-            <div class="card-title"><span class="card-icon">⚙</span> Operating Conditions</div>
-            <p class="card-desc">Conditions at the time of this inspection.</p>
+            <div class="card-title"><span class="card-icon">&#9881;</span> Operating Conditions</div>
             <div class="form-row cols-2">
               <div class="form-group">
                 <label>Load <span class="unit">(%)</span></label>
-                <input type="number" id="insp-load" value="70" min="10" max="110" step="0.5" />
-                <input type="range" class="slider" id="insp-load-slider" min="10" max="110" value="70" oninput="syncSlider('insp-load','insp-load-slider')" />
+                <input type="number" id="insp-load" value="70" min="10" max="110" step="0.5"/>
+                <input type="range" class="slider" id="insp-load-slider" min="10" max="110" value="70" oninput="syncSlider('insp-load','insp-load-slider')"/>
               </div>
               <div class="form-group">
-                <label>Belt Speed <span class="unit">(m/s)</span></label>
-                <input type="number" id="insp-speed" value="3.0" min="0.5" max="6" step="0.1" />
-                <input type="range" class="slider" id="insp-speed-slider" min="0.5" max="6" step="0.1" value="3.0" oninput="syncSlider('insp-speed','insp-speed-slider')" />
+                <label>Speed <span class="unit">(m/s)</span></label>
+                <input type="number" id="insp-speed" value="3.0" min="0.5" max="10" step="0.1"/>
+                <input type="range" class="slider" id="insp-speed-slider" min="0.5" max="10" step="0.1" value="3.0" oninput="syncSlider('insp-speed','insp-speed-slider')"/>
               </div>
               <div class="form-group">
-                <label>Temperature <span class="unit">(°C)</span></label>
-                <input type="number" id="insp-temp" value="30" min="10" max="85" step="0.5" />
-                <input type="range" class="slider" id="insp-temp-slider" min="10" max="85" value="30" oninput="syncSlider('insp-temp','insp-temp-slider')" />
+                <label>Temperature <span class="unit">(&#176;C)</span></label>
+                <input type="number" id="insp-temp" value="30" min="10" max="120" step="0.5"/>
+                <input type="range" class="slider" id="insp-temp-slider" min="10" max="120" value="30" oninput="syncSlider('insp-temp','insp-temp-slider')"/>
               </div>
               <div class="form-group">
                 <label>Vibration <span class="unit">(mm/s)</span></label>
-                <input type="number" id="insp-vib" value="4.0" min="1" max="20" step="0.1" />
-                <input type="range" class="slider" id="insp-vib-slider" min="1" max="20" step="0.1" value="4.0" oninput="syncSlider('insp-vib','insp-vib-slider')" />
+                <input type="number" id="insp-vib" value="4.0" min="1" max="40" step="0.1"/>
+                <input type="range" class="slider" id="insp-vib-slider" min="1" max="40" step="0.1" value="4.0" oninput="syncSlider('insp-vib','insp-vib-slider')"/>
               </div>
             </div>
           </div>
 
-          <!-- Inputs for model features that have no fixed field above (built from the trained model) -->
           <div class="card hidden" id="extra-inputs-card">
-            <div class="card-title"><span class="card-icon">➕</span> Additional Model Inputs</div>
-            <p class="card-desc">The current model was trained on these extra columns. Pre-filled with the training median — replace with your readings.</p>
+            <div class="card-title"><span class="card-icon">&#10133;</span> Additional Inputs</div>
             <div class="form-row cols-2" id="extra-inputs"></div>
           </div>
 
           <div class="card">
-            <div class="card-title"><span class="card-icon">📏</span> Degradation Readings</div>
-            <p class="card-desc">Physical measurements taken during inspection. Leave at 0 if not yet degraded.</p>
+            <div class="card-title"><span class="card-icon">&#128207;</span> Degradation Readings</div>
             <div class="form-row cols-3">
               <div class="form-group">
                 <label>Surface Wear <span class="unit">(%)</span></label>
-                <input type="number" id="insp-wear" value="0" min="0" max="100" step="0.1" />
-                <div class="threshold-bar">
-                  <div class="threshold-fill wear-fill" id="wear-fill" style="width:0%"></div>
-                </div>
-                <span class="hint">Failure at 100%</span>
+                <input type="number" id="insp-wear" value="0" min="0" max="100" step="0.1"/>
+                <div class="threshold-bar"><div class="threshold-fill wear-fill" id="wear-fill" style="width:0%"></div></div>
+                <span class="hint">Threshold: 100%</span>
               </div>
               <div class="form-group">
                 <label>Elongation <span class="unit">(%)</span></label>
-                <input type="number" id="insp-elong" value="0" min="0" max="4" step="0.01" />
-                <div class="threshold-bar">
-                  <div class="threshold-fill elong-fill" id="elong-fill" style="width:0%"></div>
-                </div>
-                <span class="hint">Failure at 4%</span>
+                <input type="number" id="insp-elong" value="0" min="0" max="5" step="0.01"/>
+                <div class="threshold-bar"><div class="threshold-fill elong-fill" id="elong-fill" style="width:0%"></div></div>
+                <span class="hint">Threshold: 4%</span>
               </div>
               <div class="form-group">
                 <label>Crack Length <span class="unit">(mm)</span></label>
-                <input type="number" id="insp-crack" value="0" min="0" max="50" step="0.1" />
-                <div class="threshold-bar">
-                  <div class="threshold-fill crack-fill" id="crack-fill" style="width:0%"></div>
-                </div>
-                <span class="hint">Failure at 50mm</span>
+                <input type="number" id="insp-crack" value="0" min="0" max="60" step="0.1"/>
+                <div class="threshold-bar"><div class="threshold-fill crack-fill" id="crack-fill" style="width:0%"></div></div>
+                <span class="hint">Threshold: 50mm</span>
               </div>
             </div>
           </div>
 
           <div class="action-row">
-            <button class="btn btn-ghost" onclick="goToStep(2)">← Back</button>
             <button class="btn btn-primary btn-large" id="btn-predict" onclick="addInspection()">
-              <span class="btn-icon">🔮</span> Predict RUL
+              <span class="btn-icon">&#128302;</span> Forecast RUL
             </button>
           </div>
+
         </div>
 
-        <!-- Right: live results -->
-        <div class="results-col" id="results-col">
+        <!-- Results column -->
+        <div class="results-col">
+
           <div class="results-empty" id="results-empty">
-            <div class="results-empty-icon">🔮</div>
-            <div>Submit your first inspection to see the RUL prediction.</div>
-            <div class="results-empty-sub">Confidence will grow with each reading.</div>
+            <div class="re-icon">&#128302;</div>
+            <div class="re-text">Submit your first reading</div>
+            <div class="re-sub">RUL confidence grows with each inspection cycle</div>
           </div>
 
-          <!-- RUL Card (hidden until first prediction) -->
           <div class="rul-card hidden" id="rul-card">
             <div class="rul-header">Remaining Useful Life</div>
-            <div class="rul-value" id="rul-value">— hrs</div>
+            <div class="rul-value" id="rul-value">—</div>
+            <div class="rul-unit">hours</div>
             <div class="rul-sub" id="rul-sub">—</div>
 
             <div class="confidence-section">
@@ -358,46 +337,42 @@
                 <div class="health-value risk" id="dominant-risk">—</div>
               </div>
               <div class="health-item">
-                <div class="health-label">Runtime (hrs)</div>
+                <div class="health-label">Run Hours</div>
                 <div class="health-value" id="runtime-hrs">—</div>
               </div>
               <div class="health-item">
-                <div class="health-label">Inspections</div>
-                <div class="health-value" id="insp-count-card">—</div>
+                <div class="health-label">Algorithm</div>
+                <div class="health-value" id="active-algo-name">—</div>
               </div>
             </div>
 
-            <!-- Degradation gauges -->
-            <div class="gauge-row">
-              <div class="gauge">
+            <div class="gauges-row">
+              <div class="gauge-item">
                 <div class="gauge-label">Wear</div>
-                <div class="gauge-ring" id="gauge-wear">
+                <div class="gauge-circle">
                   <svg viewBox="0 0 80 80">
-                    <circle cx="40" cy="40" r="34" class="gauge-bg"/>
-                    <circle cx="40" cy="40" r="34" class="gauge-fg wear-gauge" id="gauge-wear-circle"
-                      stroke-dasharray="213.6" stroke-dashoffset="213.6"/>
+                    <circle class="gauge-bg" cx="40" cy="40" r="34"/>
+                    <circle class="gauge-bar wear-gauge" id="gauge-wear" cx="40" cy="40" r="34" stroke-dasharray="213.6" stroke-dashoffset="213.6"/>
                   </svg>
                   <div class="gauge-pct" id="gauge-wear-pct">0%</div>
                 </div>
               </div>
-              <div class="gauge">
+              <div class="gauge-item">
                 <div class="gauge-label">Elongation</div>
-                <div class="gauge-ring">
+                <div class="gauge-circle">
                   <svg viewBox="0 0 80 80">
-                    <circle cx="40" cy="40" r="34" class="gauge-bg"/>
-                    <circle cx="40" cy="40" r="34" class="gauge-fg elong-gauge" id="gauge-elong-circle"
-                      stroke-dasharray="213.6" stroke-dashoffset="213.6"/>
+                    <circle class="gauge-bg" cx="40" cy="40" r="34"/>
+                    <circle class="gauge-bar elong-gauge" id="gauge-elong" cx="40" cy="40" r="34" stroke-dasharray="213.6" stroke-dashoffset="213.6"/>
                   </svg>
                   <div class="gauge-pct" id="gauge-elong-pct">0%</div>
                 </div>
               </div>
-              <div class="gauge">
-                <div class="gauge-label">Crack</div>
-                <div class="gauge-ring">
+              <div class="gauge-item">
+                <div class="gauge-label">Cracking</div>
+                <div class="gauge-circle">
                   <svg viewBox="0 0 80 80">
-                    <circle cx="40" cy="40" r="34" class="gauge-bg"/>
-                    <circle cx="40" cy="40" r="34" class="gauge-fg crack-gauge" id="gauge-crack-circle"
-                      stroke-dasharray="213.6" stroke-dashoffset="213.6"/>
+                    <circle class="gauge-bg" cx="40" cy="40" r="34"/>
+                    <circle class="gauge-bar crack-gauge" id="gauge-crack" cx="40" cy="40" r="34" stroke-dasharray="213.6" stroke-dashoffset="213.6"/>
                   </svg>
                   <div class="gauge-pct" id="gauge-crack-pct">0%</div>
                 </div>
@@ -405,52 +380,277 @@
             </div>
           </div>
 
-          <!-- History chart -->
           <div class="card history-card hidden" id="history-card">
-            <div class="card-title"><span class="card-icon">📈</span> Prediction History</div>
+            <div class="card-title"><span class="card-icon">&#128200;</span> RUL Trajectory</div>
             <canvas id="rul-chart" height="200"></canvas>
           </div>
 
-          <!-- History table -->
           <div class="card hidden" id="history-table-card">
-            <div class="card-title"><span class="card-icon">📋</span> Inspection Log</div>
+            <div class="card-title"><span class="card-icon">&#128203;</span> Inspection Log</div>
             <div class="table-wrap">
-              <table class="inspection-table" id="inspection-table">
+              <table class="inspection-table">
                 <thead>
-                  <tr>
-                    <th>#</th>
-                    <th>Hour</th>
-                    <th>RUL (hrs)</th>
-                    <th>Confidence</th>
-                    <th>Health</th>
-                    <th>Wear</th>
-                    <th>Elong.</th>
-                    <th>Crack</th>
-                  </tr>
+                  <tr><th>#</th><th>Hour</th><th>RUL (hrs)</th><th>Confidence</th><th>Health</th><th>Wear</th><th>Elong.</th><th>Crack</th></tr>
                 </thead>
                 <tbody id="inspection-tbody"></tbody>
               </table>
             </div>
           </div>
-        </div>
-      </div>
-    </section>
 
-  </main>
+        </div><!-- /results-col -->
+      </div><!-- /inspection-layout -->
 
-  <!-- ═══════════════════ TOAST ═══════════════════ -->
-  <div id="toast" class="toast hidden"></div>
-
-  <!-- ═══════════════════ LOADING OVERLAY ═══════════════════ -->
-  <div id="overlay" class="overlay hidden">
-    <div class="overlay-box">
-      <div class="spinner"></div>
-      <div class="overlay-text" id="overlay-text">Training model…</div>
-      <div class="overlay-sub" id="overlay-sub">This may take a minute.</div>
     </div>
   </div>
 
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-  <script src="script.js"></script>
+  <!-- ════════════════════════════════════════════════
+       VIEW 4: TRAINING
+       Dataset pick + algorithm + train action
+       ════════════════════════════════════════════════ -->
+  <div class="view" id="view-train">
+    <div class="view-inner">
+
+      <div class="page-head">
+        <button class="btn-back" onclick="showView('view-hub')">&#8592; Back to Hub</button>
+        <div>
+          <h2 class="page-title">Train a New Model</h2>
+          <p class="page-sub">Choose a dataset, select an algorithm, then train and compare</p>
+        </div>
+      </div>
+
+      <!-- Active belt chip -->
+      <div class="active-belt-chip" id="train-belt-chip">
+        <span id="train-chip-icon">&#9881;</span>
+        <span id="train-chip-name">—</span>
+      </div>
+
+      <!-- Dataset picker -->
+      <div class="card">
+        <div class="card-title-row">
+          <div class="card-title"><span class="card-icon">&#128194;</span> Select Dataset</div>
+          <button class="btn-icon-only" onclick="loadDatasets()" title="Refresh">&#8635;</button>
+        </div>
+        <p class="card-desc">Pick a telemetry CSV. Column mapping will be reviewed automatically.</p>
+        <div id="dataset-list" class="dataset-list">
+          <div class="empty-state">Loading datasets…</div>
+        </div>
+      </div>
+
+      <!-- Upload & Generate (secondary, collapsible) -->
+      <details class="data-tools-details">
+        <summary class="data-tools-summary">&#8679; Upload or Generate Dataset</summary>
+        <div class="data-tools-body">
+          <label class="upload-drop" id="upload-drop">
+            <input type="file" id="upload-file" accept=".csv" onchange="uploadDataset()" hidden/>
+            <div class="upload-icon">&#128196;</div>
+            <div class="upload-text">Drag &amp; drop CSV or <span class="link">click to browse</span></div>
+          </label>
+          <div id="upload-status" class="upload-status hidden"></div>
+          <div class="gen-row">
+            <div class="form-group" style="flex:1"><label>Belts</label><input type="number" id="gen-belts" value="300" min="50" max="2000"/></div>
+            <div class="form-group" style="flex:1"><label>Max Hours</label><input type="number" id="gen-max-hours" value="20000" min="5000" max="50000" step="1000"/></div>
+            <div class="form-group" style="flex:1"><label>Seed</label><input type="number" id="gen-seed" value="42"/></div>
+          </div>
+          <button class="btn btn-outline" id="btn-generate" onclick="generateData()" style="margin-top:10px;width:100%;justify-content:center">
+            &#9889; Generate Synthetic Dataset
+          </button>
+          <div id="gen-log" class="log-box hidden"></div>
+        </div>
+      </details>
+
+      <!-- Column mapping (inline, only when triggered) -->
+      <div class="card mapping-card hidden" id="mapping-card">
+        <div class="card-title-row">
+          <div class="card-title">&#128365; Review Column Mapping<span class="mapping-source" id="mapping-source"></span></div>
+          <button class="btn btn-ghost btn-sm" onclick="closeMapping()">Dismiss</button>
+        </div>
+        <p class="card-desc">Map your dataset columns to canonical telemetry features. Nothing trains until you approve.</p>
+        <div id="mapping-warnings"></div>
+        <div class="table-wrap">
+          <table class="inspection-table mapping-table">
+            <thead><tr><th>Your column</th><th>Sample values</th><th>Maps to</th><th>Confidence</th><th>Scale</th><th>Offset</th><th>Why</th></tr></thead>
+            <tbody id="mapping-tbody"></tbody>
+          </table>
+        </div>
+        <div id="mapping-result"></div>
+        <div class="action-row">
+          <button class="btn btn-ghost" onclick="closeMapping()">Cancel</button>
+          <button class="btn btn-primary" id="btn-approve-mapping" onclick="approveMapping()">&#10003; Approve Mapping</button>
+        </div>
+      </div>
+
+      <!-- Train controls -->
+      <div class="train-controls-card card">
+        <div class="card-title"><span class="card-icon">&#9881;</span> Training Configuration</div>
+        <div class="train-controls-row">
+          <div class="form-group" style="flex:1">
+            <label>Selected Dataset</label>
+            <div class="chip-value" id="selected-dataset-display" style="padding:10px 12px;background:var(--bg-input);border-radius:8px;border:1px solid var(--border);font-family:'JetBrains Mono',monospace;font-size:13px">No dataset selected</div>
+          </div>
+          <div class="form-group" style="flex:1">
+            <label>Algorithm</label>
+            <select id="train-algorithm" class="select-field">
+              <option value="xgboost">XGBoost — High accuracy &amp; non-linear</option>
+              <option value="random_forest">Random Forest — Robust to noise</option>
+              <option value="gradient_boosting">Gradient Boosting — Smooth wear curves</option>
+            </select>
+          </div>
+          <div class="form-group" style="align-self:flex-end">
+            <button class="btn btn-sm btn-ghost" id="btn-map" onclick="openMapping()" disabled>&#128365; Check Mapping</button>
+          </div>
+        </div>
+        <button class="btn btn-primary btn-large btn-block" id="btn-train" onclick="trainCandidateModel()" disabled>
+          <span class="btn-spinner hidden" id="train-spinner">&#9651;</span>
+          &#128640; Train &amp; Open Comparison Studio
+        </button>
+      </div>
+
+    </div>
+  </div>
+
+</main><!-- /main -->
+
+<!-- ════ MODALS ════ -->
+
+<!-- Add custom belt type -->
+<div class="modal-backdrop hidden" id="custom-belt-modal">
+  <div class="modal-card">
+    <div class="modal-header">
+      <div class="modal-title">&#10133; Add Custom Belt Profile</div>
+      <button class="btn-close" onclick="closeAddBeltModal()">&#10005;</button>
+    </div>
+    <p class="modal-desc">Define a specialized belt geometry with its baseline mechanical properties.</p>
+    <div class="form-row cols-2">
+      <div class="form-group"><label>Belt Name</label><input type="text" id="custom-name" placeholder="e.g. Chevron Cleated ST-2000"/></div>
+      <div class="form-group"><label>Geometry / Profile</label><input type="text" id="custom-geometry" placeholder="e.g. Cleated V-Pattern"/></div>
+    </div>
+    <div class="form-row cols-3">
+      <div class="form-group"><label>Hardness (Shore A)</label><input type="number" id="custom-hardness" value="68" min="30" max="95"/></div>
+      <div class="form-group"><label>Thickness (mm)</label><input type="number" id="custom-thickness" value="16" min="2" max="50"/></div>
+      <div class="form-group"><label>Tensile (kN/m)</label><input type="number" id="custom-tensile" value="1600" min="100" max="5000"/></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group full-width">
+        <label>Failure Modes <span class="hint">(comma separated)</span></label>
+        <input type="text" id="custom-failures" value="Cover Wear, Splice Fatigue, Cord Shear"/>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group full-width">
+        <label>Description</label>
+        <input type="text" id="custom-desc" placeholder="e.g. High-incline quarry transport belt"/>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeAddBeltModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="submitCustomBeltType()">Save Profile</button>
+    </div>
+  </div>
+</div>
+
+<!-- Model Comparison Studio -->
+<div class="modal-backdrop hidden" id="comparison-modal">
+  <div class="modal-card modal-large">
+    <div class="modal-header">
+      <div>
+        <div class="modal-title">&#9878; Model Comparison Studio</div>
+        <div class="modal-sub" id="comp-models-sub">Candidate vs Active Champion</div>
+      </div>
+      <button class="btn-close" onclick="closeComparisonModal()">&#10005;</button>
+    </div>
+    <div class="verdict-banner" id="verdict-banner">
+      <div class="verdict-pill" id="verdict-pill">RESULT</div>
+      <div class="verdict-text" id="verdict-text">Evaluating…</div>
+    </div>
+    <div class="comparison-grid">
+      <div class="comp-col candidate-col">
+        <div class="comp-col-header"><span class="badge-role">CANDIDATE</span><div class="comp-algo-name" id="cand-algo-name">—</div><div class="comp-model-id" id="cand-model-id">—</div></div>
+        <div class="metric-row"><span class="m-label">R&#178; Score</span><span class="m-val" id="cand-r2">—</span></div>
+        <div class="metric-row"><span class="m-label">MAE (hrs)</span><span class="m-val" id="cand-mae">—</span></div>
+        <div class="metric-row"><span class="m-label">RMSE (hrs)</span><span class="m-val" id="cand-rmse">—</span></div>
+        <div class="metric-row"><span class="m-label">Training Rows</span><span class="m-val" id="cand-rows">—</span></div>
+      </div>
+      <div class="comp-col deltas-col">
+        <div class="comp-col-header text-center"><span class="badge-role delta-badge">&#916; DELTA</span></div>
+        <div class="delta-box"><div class="delta-label">&#916; R&#178;</div><div class="delta-num" id="delta-r2">—</div></div>
+        <div class="delta-box"><div class="delta-label">&#916; MAE</div><div class="delta-num" id="delta-mae">—</div></div>
+        <div class="delta-box"><div class="delta-label">&#916; RMSE</div><div class="delta-num" id="delta-rmse">—</div></div>
+      </div>
+      <div class="comp-col champion-col">
+        <div class="comp-col-header"><span class="badge-role champ-badge">&#9733; CHAMPION</span><div class="comp-algo-name" id="champ-algo-name">—</div><div class="comp-model-id" id="champ-model-id">—</div></div>
+        <div class="metric-row"><span class="m-label">R&#178; Score</span><span class="m-val" id="champ-r2">—</span></div>
+        <div class="metric-row"><span class="m-label">MAE (hrs)</span><span class="m-val" id="champ-mae">—</span></div>
+        <div class="metric-row"><span class="m-label">RMSE (hrs)</span><span class="m-val" id="champ-rmse">—</span></div>
+        <div class="metric-row"><span class="m-label">Training Rows</span><span class="m-val" id="champ-rows">—</span></div>
+      </div>
+    </div>
+    <div class="tradeoffs-container">
+      <div class="tradeoff-box">
+        <div class="tradeoff-title" id="cand-tradeoff-title">Candidate</div>
+        <div class="tradeoff-sub" id="cand-tradeoff-cat">—</div>
+        <div class="tradeoff-section"><div class="tradeoff-heading pros">&#10003; Advantages</div><ul class="tradeoff-list" id="cand-pros-list"></ul></div>
+        <div class="tradeoff-section"><div class="tradeoff-heading cons">&#9888; Disadvantages</div><ul class="tradeoff-list" id="cand-cons-list"></ul></div>
+        <div class="best-for" id="cand-best-for"></div>
+      </div>
+      <div class="tradeoff-box" id="champ-tradeoff-box">
+        <div class="tradeoff-title" id="champ-tradeoff-title">Champion</div>
+        <div class="tradeoff-sub" id="champ-tradeoff-cat">—</div>
+        <div class="tradeoff-section"><div class="tradeoff-heading pros">&#10003; Advantages</div><ul class="tradeoff-list" id="champ-pros-list"></ul></div>
+        <div class="tradeoff-section"><div class="tradeoff-heading cons">&#9888; Disadvantages</div><ul class="tradeoff-list" id="champ-cons-list"></ul></div>
+        <div class="best-for" id="champ-best-for"></div>
+      </div>
+    </div>
+    <div class="recommendation-card">
+      <div class="rec-title"><span class="rec-icon">&#128161;</span> Recommendation</div>
+      <p class="rec-text" id="rec-text">Evaluating…</p>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeComparisonModal()">Keep Champion</button>
+      <button class="btn btn-primary" id="btn-promote-champion" onclick="promoteCurrentCandidate()">&#9733; Promote to Champion</button>
+    </div>
+  </div>
+</div>
+
+<!-- Benchmark Results -->
+<div class="modal-backdrop hidden" id="benchmark-modal">
+  <div class="modal-card modal-large">
+    <div class="modal-header">
+      <div>
+        <div class="modal-title">&#9889; Benchmark Report</div>
+        <div class="modal-sub" id="bench-modal-sub">Champion model on unseen dataset</div>
+      </div>
+      <button class="btn-close" onclick="closeBenchmarkModal()">&#10005;</button>
+    </div>
+    <div class="benchmark-summary-bar">
+      <div class="bench-stat"><span class="bench-label">Evaluated Rows</span><span class="bench-val" id="bench-rows">—</span></div>
+      <div class="bench-stat"><span class="bench-label">Generalization R&#178;</span><span class="bench-val accent" id="bench-r2">—</span></div>
+      <div class="bench-stat"><span class="bench-label">MAE</span><span class="bench-val" id="bench-mae">—</span></div>
+      <div class="bench-stat"><span class="bench-label">RMSE</span><span class="bench-val" id="bench-rmse">—</span></div>
+    </div>
+    <div class="card">
+      <div class="card-title">&#128300; Sample Inference Audit</div>
+      <div class="table-wrap">
+        <table class="inspection-table">
+          <thead><tr><th>Sample</th><th>Actual RUL</th><th>Predicted RUL</th><th>Error</th></tr></thead>
+          <tbody id="bench-sample-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="modal-actions"><button class="btn btn-primary" onclick="closeBenchmarkModal()">Done</button></div>
+  </div>
+</div>
+
+<!-- Toast + overlay -->
+<div id="toast" class="toast hidden"></div>
+<div id="overlay" class="overlay hidden">
+  <div class="overlay-box">
+    <div class="spinner"></div>
+    <div class="overlay-text" id="overlay-text">Processing…</div>
+    <div class="overlay-sub" id="overlay-sub">Please wait.</div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="script.js"></script>
 </body>
 </html>

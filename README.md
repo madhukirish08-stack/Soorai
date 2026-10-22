@@ -7,12 +7,13 @@ AI-powered Remaining Useful Life (RUL) prediction and degradation forecasting sy
 ## 🚀 Key Features
 
 - **Live Browser Dashboard**: Sleek, responsive web interface (`http://localhost:8001/ui`).
-- **Dynamic Progressive Confidence**: Confidence starts at baseline (~40%) on initial inspection and progressively grows toward model accuracy (test $R^2$ on belts held out from training, $\approx 0.89$ on the synthetic data) as more sequential inspection points are recorded.
-- **Works With Any Dataset**: Upload any belt CSV. Gemini proposes how its columns (names, units) map to the model schema, an engineer reviews and approves, and the approved profile is reused for later uploads with the same columns.
-- **Automatic RUL Target**: If the data has no remaining-life column, RUL is computed from recorded failure hours, or estimated from degradation trends (clearly flagged — see [docs/DATA_REQUIREMENTS.md](docs/DATA_REQUIREMENTS.md)).
-- **Physical Clamping & Health Scoring**: Automatic degradation ratio calculations across wear (%), elongation (%), and crack length (mm) with dominant failure driver identification.
-- **FastAPI Backend**: Clean REST endpoints for metadata, dataset listing, on-demand training, and multi-point RUL inference.
-- **Interactive Visualization**: Real-time degradation gauges, RUL trend graphs (via Chart.js), and complete inspection history tables.
+- **Belt Category & Profile Taxonomy**: Built-in support for **Flat Conveyor Belts**, **V-Belts (Classical/Wedge)**, **Ribbed / Multi-V Belts (Poly-V)**, and **Timing / Synchronous Belts**, plus dynamic registration for custom belt geometries.
+- **Model Zoo & Checkpoint Registry**: Versioned model registry (`models_v2/models_registry.json`) tracking hyperparameters, metrics ($R^2$, MAE, RMSE), and champion status across belt profiles.
+- **Dataset Decision Gate**: Choose between **Zero-Training Benchmarking** on the active champion model or **Training a Candidate Model** from scratch with algorithm choice (XGBoost, Random Forest, Gradient Boosting).
+- **Intelligent Model Comparison Studio**: Side-by-side metric comparison, automated performance verdicts (*Good / Champion*, *Marginal*, *Degraded*), algorithmic trade-offs (advantages & disadvantages), and one-click promotion to champion.
+- **Dynamic Progressive Confidence**: Confidence starts at baseline (~40%) on initial inspection and progressively grows toward model accuracy as more sequential inspection points are recorded.
+- **Works With Any Dataset**: Upload any belt CSV. Column mappings are reviewed and validated before training.
+- **FastAPI Backend**: Clean REST endpoints for metadata, belt profiles, model registry, benchmarking, and multi-point RUL inference.
 
 ---
 
@@ -22,22 +23,27 @@ AI-powered Remaining Useful Life (RUL) prediction and degradation forecasting sy
 v2/
 ├── backend/
 │   ├── api.py                 # FastAPI REST backend & static file server
-│   ├── train_model.py         # XGBoost RUL trainer
+│   ├── model_registry.py      # Versioned model registry, comparison engine & benchmarks
+│   ├── belt_types.json        # Standard & custom belt geometry profiles
+│   ├── train_model.py         # Multi-algorithm RUL trainer (XGBoost, Random Forest, Gradient Boosting)
 │   ├── schema_mapper.py       # Column mapping (Gemini proposal), validation, RUL derivation
 │   └── canonical_schema.json  # The field names/units/ranges the model is trained on
 ├── frontend/
-│   ├── index.html         # Modern dark-theme web dashboard
-│   ├── script.js          # Interactive UI state & chart logic
-│   └── style.css          # Curated responsive design system
+│   ├── index.html             # Web dashboard & Model Comparison Studio
+│   ├── script.js              # Interactive UI state, decision gate & comparison logic
+│   └── style.css              # Curated responsive design system & modal styles
 ├── training/
-│   └── training_data_5_oct.py   # Physics-informed synthetic dataset generator
+│   └── training_data_5_oct.py # Physics-informed synthetic dataset generator
 ├── data/
 │   └── belt_rul_training_data.csv  # Active training dataset
-├── mappings/                # Human-approved column mappings (one per dataset)
+├── mappings/                  # Human-approved column mappings (one per dataset)
 ├── docs/
-│   └── DATA_REQUIREMENTS.md # What the plant should record (share with the company)
+│   └── DATA_REQUIREMENTS.md   # Telemetry specification for industrial plant data
 └── models_v2/
-    └── model_metadata.json  # Feature importance, training metrics & statistics
+    ├── models_registry.json   # Catalog of all trained models & active champion
+    ├── rul_model.pkl          # Active production champion model
+    ├── model_metadata.json    # Active champion metadata & statistics
+    └── runs/                  # Versioned checkpoints per run (artifacts + metadata)
 ```
 
 ---

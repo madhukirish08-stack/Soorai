@@ -1,0 +1,96 @@
+{
+  "types": {
+    "flat_conveyor": {
+      "id": "flat_conveyor",
+      "name": "Flat Conveyor Belt",
+      "geometry": "Flat Profile",
+      "icon": "\ud83d\udd32",
+      "description": "Standard heavy material handling & overland conveyor belts. Subject to high continuous load and abrasive bulk contact.",
+      "nominal_hardness": 65.0,
+      "nominal_thickness": 15.0,
+      "nominal_tensile": 1000.0,
+      "typical_failure_modes": [
+        "Cover Wear",
+        "Elongation Creep",
+        "Longitudinal Cracks"
+      ]
+    },
+    "v_belt": {
+      "id": "v_belt",
+      "name": "V-Belt (Classical / Wedge)",
+      "geometry": "Trapezoidal V-Shape",
+      "icon": "\ud83d\udd3b",
+      "description": "High-traction wedge drive belts for industrial pulleys, motors, pumps, and compressors. Operates via wedging friction in sheave grooves.",
+      "nominal_hardness": 75.0,
+      "nominal_thickness": 11.0,
+      "nominal_tensile": 600.0,
+      "typical_failure_modes": [
+        "Sidewall Glazing/Wear",
+        "Bottom Cracking",
+        "Slip Elongation"
+      ]
+    },
+    "ribbed_multi_v": {
+      "id": "ribbed_multi_v",
+      "name": "Ribbed / Multi-V Belt (Poly-V)",
+      "geometry": "Multi-Ribbed Serpentine",
+      "icon": "\u3030\ufe0f",
+      "description": "High-speed compact drives with multiple parallel longitudinal ribs. Combines flat belt flexibility with V-belt grip for serpentine drives.",
+      "nominal_hardness": 70.0,
+      "nominal_thickness": 5.0,
+      "nominal_tensile": 800.0,
+      "typical_failure_modes": [
+        "Rib Separation",
+        "Flex Fatigue Cracks",
+        "Cord Shear"
+      ]
+    },
+    "timing_toothed": {
+      "id": "timing_toothed",
+      "name": "Timing / Synchronous Belt",
+      "geometry": "Toothed Positive Drive",
+      "icon": "\u2699\ufe0f",
+      "description": "Precision positive-engagement synchronous belts with molded teeth. Zero slip for timing pulleys, automation, and robotics.",
+      "nominal_hardness": 85.0,
+      "nominal_thickness": 6.0,
+      "nominal_tensile": 1200.0,
+      "typical_failure_modes": [
+        "Tooth Root Cracking",
+        "Tooth Shear",
+        "Tensile Cord Fracture"
+      ]
+    },
+    "chevron_cleated_st-2000": {
+      "id": "chevron_cleated_st-2000",
+      "name": "Chevron Cleated ST-2000",
+      "geometry": "Cleated Incline",
+      "icon": "\u2699\ufe0f",
+      "description": "Custom configured belt profile.",
+      "nominal_hardness": 68.0,
+      "nominal_thickness": 18.0,
+      "nominal_tensile": 2000.0,
+      "typical_failure_modes": [
+        "Cleat Detachment",
+        "Cord Fatigue"
+      ],
+      "is_custom": true,
+      "created_at": "2026-10-21T17:51:38.335925"
+    },
+    "test_hexagonal_double_v": {
+      "id": "test_hexagonal_double_v",
+      "name": "Hexagonal Double-V Belt",
+      "geometry": "Double-V Hexagonal",
+      "icon": "\ud83d\udd37",
+      "description": "Dual-sided V-drive for serpentine counter-rotating shafts.",
+      "nominal_hardness": 72.0,
+      "nominal_thickness": 14.0,
+      "nominal_tensile": 900.0,
+      "typical_failure_modes": [
+        "Dual Sidewall Fatigue",
+        "Flex Glazing"
+      ],
+      "is_custom": true,
+      "created_at": "2026-10-21T17:59:04.497006"
+    }
+  }
+}

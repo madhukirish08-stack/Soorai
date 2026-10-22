@@ -7,12 +7,19 @@ Endpoints:
   GET  /metadata              - Model info and feature stats
   GET  /datasets              - List available CSV datasets in data/ folder
   POST /upload-dataset        - Upload a new CSV dataset
-  POST /train                 - Train (or retrain) on the selected dataset
+  POST /train                 - Train (or retrain) on the selected dataset with chosen algorithm & belt type
   POST /predict               - Predict RUL with confidence from inspection readings
   POST /generate-data         - Run training_data_5_oct.py to generate fresh data
   GET  /schema                - Canonical schema the model is trained on
   POST /schema/propose        - LLM (Gemini) column-mapping proposal for a dataset
   POST /schema/approve        - Validate + save a human-approved column mapping
+  GET  /belt-types            - Get all standard + custom belt type profiles
+  POST /belt-types            - Create a new custom belt type
+  GET  /models                - List registered models, metrics, and active champion
+  GET  /models/{id}           - Detailed model metrics, hyperparameters, and trade-offs
+  POST /models/benchmark      - Zero-training evaluation of an existing model on a dataset
+  POST /models/compare        - Intelligent comparison between candidate and champion models
+  POST /models/{id}/promote   - Promote a candidate model to active production champion
 """
 
 import os
@@ -24,6 +31,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from typing import Dict, Any, Optional
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -33,8 +41,14 @@ import traceback
 # Add v2 backend to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import schema_mapper as sm
+import model_registry as mr
 
-app = FastAPI(title="Belt RUL Prediction API v2")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    load_model()
+    yield
+
+app = FastAPI(title="Belt RUL Prediction API v2", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -87,17 +101,13 @@ def compute_confidence(n_inspections: int, r2: float) -> float:
 
 def load_model():
     global MODEL_PAYLOAD
+    mr._init_registry_if_needed()
     path = os.path.join(MODELS_DIR, "rul_model.pkl")
     if os.path.exists(path):
         MODEL_PAYLOAD = joblib.load(path)
         print(f"[startup] Loaded model from {path}")
     else:
         print("[startup] No pre-trained model found. Use /train after selecting a dataset.")
-
-
-@app.on_event("startup")
-async def startup_event():
-    load_model()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -119,83 +129,91 @@ def mapping_status(filename: str, columns) -> str:
 
 @app.get("/datasets")
 async def list_datasets():
-    """List all CSV datasets available in the data/ folder."""
-    csvs = []
-    if os.path.isdir(DATA_DIR):
-        for f in os.listdir(DATA_DIR):
-            if f.lower().endswith(".csv"):
-                full = os.path.join(DATA_DIR, f)
-                size_mb = round(os.path.getsize(full) / 1_048_576, 2)
-                # Peek at row/column count
-                try:
-                    df_peek = pd.read_csv(full, nrows=3)
-                    cols = list(df_peek.columns)
-                except Exception:
-                    cols = []
-                csvs.append({
-                    "filename": f,
-                    "path": full,
-                    "size_mb": size_mb,
-                    "columns": cols,
-                    "mapping_status": mapping_status(f, cols),
-                })
-    return {"datasets": csvs, "data_dir": DATA_DIR}
+    datasets = []
+    for f in sorted(os.listdir(DATA_DIR)):
+        if not f.endswith(".csv"):
+            continue
+        full = os.path.join(DATA_DIR, f)
+        size_mb = round(os.path.getsize(full) / (1024 * 1024), 2)
+        try:
+            preview = pd.read_csv(full, nrows=3)
+            cols = list(preview.columns)
+            datasets.append({
+                "filename": f,
+                "path": full,
+                "size_mb": size_mb,
+                "columns": cols,
+                "sample_row": preview.iloc[0].to_dict() if len(preview) > 0 else {},
+                "mapping_status": mapping_status(full, cols),
+            })
+        except Exception as e:
+            datasets.append({
+                "filename": f, "path": full, "size_mb": size_mb,
+                "columns": [], "error": str(e),
+                "mapping_status": "required",
+            })
+    return {"datasets": datasets}
 
 
 @app.post("/upload-dataset")
 async def upload_dataset(file: UploadFile = File(...)):
-    """Upload a new CSV dataset to the data/ folder."""
-    if not file.filename.lower().endswith(".csv"):
-        return JSONResponse(status_code=400, content={"error": "Only CSV files accepted."})
-    dest = os.path.join(DATA_DIR, file.filename)
-    contents = await file.read()
+    if not file.filename.endswith(".csv"):
+        return JSONResponse(status_code=400, content={"error": "Only CSV files are supported."})
+
+    safe_name = os.path.basename(file.filename)
+    dest = os.path.join(DATA_DIR, safe_name)
+    content = await file.read()
     with open(dest, "wb") as f:
-        f.write(contents)
-    # Quick validation
+        f.write(content)
+
     try:
-        df = pd.read_csv(io.BytesIO(contents))
-        row_count = len(df)
-        columns = list(df.columns)
+        preview = pd.read_csv(io.BytesIO(content), nrows=3)
+        cols = list(preview.columns)
     except Exception as e:
-        return JSONResponse(status_code=400, content={"error": f"Could not parse CSV: {e}"})
+        return JSONResponse(status_code=400, content={"error": f"Invalid CSV file: {e}"})
+
     return {
         "success": True,
-        "filename": file.filename,
-        "rows": row_count,
-        "columns": columns,
+        "filename": safe_name,
         "path": dest,
+        "columns": cols,
+        "mapping_status": mapping_status(dest, cols),
     }
 
 
 @app.post("/generate-data")
 async def generate_data(request: Request):
-    """
-    Run training_data_5_oct.py to generate a fresh synthetic dataset.
-    Body params (all optional): belts, max_hours, step, seed
-    """
+    """Run training_data_5_oct.py as a subprocess to produce a fresh dataset."""
     body = await request.json()
-    belts     = int(body.get("belts",     300))
+    n_belts   = int(body.get("n_belts", 300))
     max_hours = int(body.get("max_hours", 20000))
-    step      = int(body.get("step",      100))
-    seed      = int(body.get("seed",      42))
-    out_name  = body.get("output_name",   "belt_rul_training_data.csv")
-    out_path  = os.path.join(DATA_DIR, out_name)
+    step      = int(body.get("step_hours", 100))
+    seed      = int(body.get("seed", 42))
 
     if not os.path.exists(TRAINING_SCRIPT):
-        return JSONResponse(status_code=404,
-            content={"error": f"training_data_5_oct.py not found at {TRAINING_SCRIPT}"})
+        return JSONResponse(status_code=500, content={
+            "error": f"Script not found at {TRAINING_SCRIPT}"
+        })
 
-    cmd = (
-        f'python "{TRAINING_SCRIPT}" '
-        f'--belts {belts} --max-hours {max_hours} --step {step} '
-        f'--seed {seed} --output "{out_path}"'
-    )
-    proc = await asyncio.create_subprocess_shell(
-        cmd,
+    out_name = f"synthetic_belt_data_{n_belts}b_{seed}s.csv"
+    out_path = os.path.join(DATA_DIR, out_name)
+
+    cmd = [
+        sys.executable, TRAINING_SCRIPT,
+        "--belts", str(n_belts),
+        "--max-hours", str(max_hours),
+        "--step", str(step),
+        "--seed", str(seed),
+        "--output", out_path,
+    ]
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
     stdout, stderr = await proc.communicate()
+
     if proc.returncode != 0:
         return JSONResponse(status_code=500, content={
             "error": "Data generation failed.",
@@ -209,15 +227,108 @@ async def generate_data(request: Request):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Belt Types endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/belt-types")
+async def get_belt_types():
+    return mr.load_belt_types()
+
+
+@app.post("/belt-types")
+async def create_belt_type(request: Request):
+    data = await request.json()
+    try:
+        created = mr.add_custom_belt_type(data)
+        return {"success": True, "belt_type": created}
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Model Registry & Comparison endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/models")
+async def list_models(belt_type: Optional[str] = None):
+    return mr.get_model_registry(belt_type)
+
+
+@app.get("/models/{model_id}")
+async def get_model_info(model_id: str):
+    details = mr.get_model_details(model_id)
+    if not details:
+        return JSONResponse(status_code=404, content={"error": f"Model {model_id} not found."})
+    return details
+
+
+@app.post("/models/benchmark")
+async def benchmark_model(request: Request):
+    """Zero-training evaluation of an existing model against a dataset."""
+    body = await request.json()
+    csv_path = resolve_dataset(body.get("csv_path", "belt_rul_training_data.csv"))
+    model_id = body.get("model_id")
+
+    if not os.path.exists(csv_path):
+        return JSONResponse(status_code=404, content={"error": f"Dataset not found: {csv_path}"})
+
+    columns = list(pd.read_csv(csv_path, nrows=0).columns)
+    saved = sm.load_mapping(MAPPINGS_DIR, csv_path, columns)
+    if saved is None and not sm.is_legacy_canonical(columns):
+        return JSONResponse(status_code=409, content={
+            "error": "This dataset's columns must be mapped and approved before evaluation.",
+            "mapping_required": True,
+        })
+
+    try:
+        result = mr.benchmark_dataset_on_model(csv_path, model_id, saved["mapping"] if saved else None)
+        return {"success": True, "benchmark": result}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e), "traceback": traceback.format_exc()})
+
+
+@app.post("/models/compare")
+async def compare_models_endpoint(request: Request):
+    """Compare a candidate model with a baseline or active champion."""
+    body = await request.json()
+    candidate_id = body.get("candidate_id")
+    candidate_meta = body.get("candidate_meta")
+    baseline_id = body.get("baseline_id")
+
+    if candidate_id and not candidate_meta:
+        candidate_meta = mr.get_model_details(candidate_id)
+    if not candidate_meta:
+        return JSONResponse(status_code=400, content={"error": "candidate_id or candidate_meta required."})
+
+    comparison = mr.compare_models(candidate_meta, baseline_id)
+    return {"success": True, "comparison": comparison}
+
+
+@app.post("/models/{model_id}/promote")
+async def promote_model_endpoint(model_id: str):
+    global MODEL_PAYLOAD
+    try:
+        updated = mr.promote_to_champion(model_id)
+        load_model()
+        return {"success": True, "promoted": updated}
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Training endpoint
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.post("/train")
 async def train_model(request: Request):
-    """Train on the specified CSV dataset."""
+    """Train on the specified CSV dataset with chosen algorithm and belt type."""
     global MODEL_PAYLOAD
     body    = await request.json()
     csv_path = resolve_dataset(body.get("csv_path", "belt_rul_training_data.csv"))
+    algorithm = body.get("algorithm", "xgboost")
+    belt_type = body.get("belt_type", "flat_conveyor")
+    notes = body.get("notes", "")
+    promote = body.get("promote", False)
 
     if not os.path.exists(csv_path):
         return JSONResponse(status_code=404,
@@ -225,8 +336,7 @@ async def train_model(request: Request):
 
     columns = list(pd.read_csv(csv_path, nrows=0).columns)
     saved = sm.load_mapping(MAPPINGS_DIR, csv_path, columns)
-    # Human-in-the-loop gate (user requirement): a dataset whose columns are not already
-    # canonical must have a human-APPROVED mapping. Do not relax this to auto-apply LLM output.
+    # Human-in-the-loop gate (user requirement)
     if saved is None and not sm.is_legacy_canonical(columns):
         return JSONResponse(status_code=409, content={
             "error": "This dataset's columns must be mapped and approved before training.",
@@ -234,18 +344,35 @@ async def train_model(request: Request):
         })
 
     try:
-        # Dynamically import to avoid circular import issues
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from train_model import train
-        payload = train(csv_path, MODELS_DIR, saved["mapping"] if saved else None)
-        MODEL_PAYLOAD = payload
+        payload = train(
+            csv_path=csv_path,
+            output_dir=MODELS_DIR,
+            mapping=saved["mapping"] if saved else None,
+            algorithm=algorithm,
+            belt_type=belt_type,
+            notes=notes,
+            promote_to_champion=promote
+        )
+        if payload.get("is_champion", False):
+            MODEL_PAYLOAD = payload
+
+        comparison = mr.compare_models(payload)
+
         return {
             "success": True,
+            "model_id": payload["model_id"],
+            "algorithm": payload["algorithm"],
+            "belt_type": payload["belt_type"],
+            "is_champion": payload["is_champion"],
             "metrics": payload["metrics"],
             "feature_importance": payload["feature_importance"],
             "feature_cols": payload["feature_cols"],
             "rul_source": payload["rul_source"],
             "training_rows": payload["training_rows"],
+            "comparison": comparison,
+            "tradeoffs": mr.get_algorithm_tradeoffs(algorithm)
         }
     except Exception as e:
         return JSONResponse(status_code=500, content={
@@ -265,7 +392,6 @@ async def get_schema():
 
 @app.post("/schema/propose")
 def propose_schema(body: Dict[str, Any]):
-    """Sync def -> FastAPI runs it in a worker thread, so the Gemini call doesn't block the loop."""
     csv_path = resolve_dataset(body.get("csv_path"))
     if not os.path.exists(csv_path):
         return JSONResponse(status_code=404, content={"error": f"Dataset not found: {csv_path}"})
@@ -295,7 +421,6 @@ def approve_schema(body: Dict[str, Any]):
     if errors:
         return JSONResponse(status_code=422, content={"saved": False, "errors": errors, "warnings": warnings})
     if body.get("dry_run"):
-        # UI validates first so the reviewer sees warnings BEFORE anything is saved
         return {"saved": False, "errors": [], "warnings": warnings, "rul_source": rul_info}
     sm.save_mapping(MAPPINGS_DIR, csv_path, raw.columns, mapping, body.get("proposal_source", "manual"))
     return {"saved": True, "errors": [], "warnings": warnings, "rul_source": rul_info}
@@ -313,12 +438,17 @@ async def get_metadata():
             return json.load(f)
     if MODEL_PAYLOAD is None:
         return {"error": "No model trained yet."}
+    algo = MODEL_PAYLOAD.get("algorithm", "xgboost")
     return {
+        "model_id": MODEL_PAYLOAD.get("model_id"),
+        "algorithm": algo,
+        "belt_type": MODEL_PAYLOAD.get("belt_type"),
         "feature_cols": MODEL_PAYLOAD["feature_cols"],
         "rul_source": MODEL_PAYLOAD.get("rul_source"),
         "metrics": MODEL_PAYLOAD["metrics"],
         "feature_stats": MODEL_PAYLOAD["feature_stats"],
         "feature_importance": MODEL_PAYLOAD["feature_importance"],
+        "tradeoffs": mr.get_algorithm_tradeoffs(algo)
     }
 
 
@@ -330,31 +460,7 @@ async def get_metadata():
 async def predict(request: Request):
     """
     Predict Remaining Useful Life (RUL) for a belt.
-
-    Body:
-    {
-        "belt_properties": {
-            "rubber_hardness_shore_a": 65.0,
-            "belt_thickness_mm": 15.0,
-            "tensile_strength_kn_m": 1000.0
-        },
-        "inspections": [
-            {
-                "hour": 0,
-                "load_pct": 70.0,
-                "belt_speed_mps": 3.0,
-                "temperature_c": 30.0,
-                "vibration_mms": 4.0,
-                "wear_pct": 0.0,
-                "elongation_pct": 0.0,
-                "crack_length_mm": 0.0
-            },
-            ...  (more inspection readings)
-        ]
-    }
-
-    Returns: RUL prediction for the LATEST inspection point, plus confidence
-    and the full history of predictions.
+    Works with any trained model algorithm (XGBoost, Random Forest, Gradient Boosting).
     """
     if MODEL_PAYLOAD is None:
         return JSONResponse(status_code=503,
@@ -367,20 +473,18 @@ async def predict(request: Request):
     if not inspections:
         return JSONResponse(status_code=400, content={"error": "No inspection readings provided."})
 
-    xgb_model = MODEL_PAYLOAD["xgb_model"]
+    model = MODEL_PAYLOAD.get("model") or MODEL_PAYLOAD.get("xgb_model")
     feat_cols = MODEL_PAYLOAD["feature_cols"]
     feat_stats = MODEL_PAYLOAD["feature_stats"]
-    r2 = MODEL_PAYLOAD["metrics"]["xgboost"]["r2_score"]
+    algo = MODEL_PAYLOAD.get("algorithm", "xgboost")
+    algo_metrics = MODEL_PAYLOAD.get("metrics", {}).get(algo) or next(iter(MODEL_PAYLOAD.get("metrics", {}).values()), {})
+    r2 = float(algo_metrics.get("r2_score", 0.90))
 
-    # Health/failure thresholds only for degradation measures the model was trained on
     thresholds = sm.degradation_thresholds(feat_cols)
     schema_fields = sm.load_canonical()["fields"]
 
     results = []
     for idx, insp in enumerate(inspections):
-        # Feature vector follows the TRAINED model's feature list (dataset-dependent).
-        # Missing inputs fall back to the training median instead of hard-coded defaults,
-        # so models trained on customer data with different columns still predict.
         row = {}
         for col in feat_cols:
             val = insp.get(col, belt_props.get(col))
@@ -388,24 +492,20 @@ async def predict(request: Request):
         hour = float(insp.get("hour", row.get("hour", 0.0)))
 
         X = pd.DataFrame([row])[feat_cols]
-        pred_xgb = float(xgb_model.predict(X)[0])
-        pred_rul = max(pred_xgb, 0.0)
+        pred_raw = float(model.predict(X)[0])
+        pred_rul = max(pred_raw, 0.0)
 
-        # Degradation ratios use only values actually measured in this inspection
         ratios = {}
         for col, thr in thresholds.items():
             val = insp.get(col)
             if val is not None:
                 ratios[schema_fields[col]["label"]] = float(val) / thr
 
-        # Physics override clamp: if any failure threshold is met, RUL is strictly 0
         if any(r >= 1.0 for r in ratios.values()):
             pred_rul = 0.0
 
-        # Confidence grows with more inspections
         confidence = compute_confidence(idx + 1, r2)
 
-        # Health score: inverse of the worst degradation ratio (None if nothing measured)
         if ratios:
             health_score = round(max(1 - max(ratios.values()), 0.0) * 100, 1)
             dominant = max(ratios, key=ratios.get)
@@ -431,11 +531,11 @@ async def predict(request: Request):
         "total_inspections": len(inspections),
         "latest_prediction": latest,
         "prediction_history": results,
-        "model_metrics": MODEL_PAYLOAD["metrics"]["xgboost"],
+        "model_metrics": algo_metrics,
+        "algorithm": algo,
     }
 
 
 if __name__ == "__main__":
     import uvicorn
-    load_model()
     uvicorn.run(app, host="0.0.0.0", port=8001, reload=False)

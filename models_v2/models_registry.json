@@ -1,0 +1,81 @@
+{
+  "active_champion_id": "run_initial_champion",
+  "models": {
+    "run_initial_champion": {
+      "model_id": "run_initial_champion",
+      "created_at": "2026-10-21T17:51:20.981846",
+      "belt_type": "flat_conveyor",
+      "algorithm": "xgboost",
+      "dataset": "belt_rul_training_data.csv",
+      "training_rows": 28039,
+      "feature_cols": [
+        "hour",
+        "rubber_hardness_shore_a",
+        "belt_thickness_mm",
+        "tensile_strength_kn_m",
+        "belt_width_mm",
+        "belt_length_mm",
+        "cover_thickness_top_mm",
+        "pulley_alignment_mm",
+        "load_pct",
+        "belt_speed_mps",
+        "temperature_c",
+        "humidity_pct",
+        "vibration_mms",
+        "torque_nm",
+        "belt_tension_n",
+        "maintenance_count",
+        "wear_pct",
+        "elongation_pct",
+        "crack_length_mm"
+      ],
+      "metrics": {
+        "xgboost": {
+          "mae_hours": 791.3,
+          "rmse_hours": 1233.1,
+          "r2_score": 0.9129
+        }
+      },
+      "is_champion": true,
+      "notes": "Bootstrapped from existing pre-trained model."
+    },
+    "run_20261021_175918_random_forest": {
+      "model_id": "run_20261021_175918_random_forest",
+      "created_at": "2026-10-21T17:59:18.356922",
+      "belt_type": "v_belt",
+      "algorithm": "random_forest",
+      "dataset": "belt_rul_training_data.csv",
+      "training_rows": 28039,
+      "feature_cols": [
+        "hour",
+        "rubber_hardness_shore_a",
+        "belt_thickness_mm",
+        "tensile_strength_kn_m",
+        "belt_width_mm",
+        "belt_length_mm",
+        "cover_thickness_top_mm",
+        "pulley_alignment_mm",
+        "load_pct",
+        "belt_speed_mps",
+        "temperature_c",
+        "humidity_pct",
+        "vibration_mms",
+        "torque_nm",
+        "belt_tension_n",
+        "maintenance_count",
+        "wear_pct",
+        "elongation_pct",
+        "crack_length_mm"
+      ],
+      "metrics": {
+        "random_forest": {
+          "mae_hours": 857.4,
+          "rmse_hours": 1621.6,
+          "r2_score": 0.8493
+        }
+      },
+      "is_champion": false,
+      "notes": ""
+    }
+  }
+}
