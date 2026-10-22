@@ -48,6 +48,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
+
 # API docs expose every endpoint - only in development.
 app = FastAPI(title="Belt RUL API", lifespan=lifespan, docs_url="/docs" if DEV_MODE else None,
               redoc_url=None, openapi_url="/openapi.json" if DEV_MODE else None)
@@ -563,72 +564,6 @@ def approve_schema(body: ApproveBody, user: dict = Depends(auth.require_engineer
 # Model versions (engineer)
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TrainDataset(BaseModel):
-    filename: str
-    belt_type_id: Optional[int] = None
-
-
-class TrainBody(BaseModel):
-    datasets: List[TrainDataset] = Field(min_length=1)
-    notes: str = Field(default="", max_length=500)
-    method: Literal["aft", "regression"] = "aft"   # survival (median + interval) or legacy point regression
-
-
-class ActivateBody(BaseModel):
-    belt_type_ids: Optional[List[int]] = None
-
-
-class ReviewBody(BaseModel):
-    review_note: str = Field(default="", max_length=1000)
-
-
-@app.get("/api/models")
-def get_models(user: dict = Depends(auth.require_engineer)):
-    return reg.list_models()
-
-
-@app.get("/api/models/compare")
-def compare_models(a: int, b: int, user: dict = Depends(auth.require_engineer)):
-    return reg.compare(a, b)
-
-
-@app.get("/api/models/{model_id}")
-def get_model(model_id: int, user: dict = Depends(auth.require_engineer)):
-    m = reg.get_model(model_id)
-    if m is None:
-        raise HTTPException(status_code=404, detail="Model not found.")
-    return m
-
-
-@app.post("/api/models/train", status_code=202)
-def train(body: TrainBody, user: dict = Depends(auth.require_engineer)):
-    for d in body.datasets:
-        dataset_path(d.filename)
-    specs = [{"filename": d.filename, "belt_type_id": d.belt_type_id} for d in body.datasets]
-    return {"id": reg.start_training(specs, body.notes, user["id"], body.method), "status": "training"}
-
-
-@app.post("/api/models/{model_id}/activate")
-def activate_model(model_id: int, body: ActivateBody, user: dict = Depends(auth.require_engineer)):
-    return {"active_for": reg.activate(model_id, user["id"], body.belt_type_ids)}
-
-
-@app.put("/api/models/{model_id}/review")
-def review_model(model_id: int, body: ReviewBody, user: dict = Depends(auth.require_engineer)):
-    with get_conn() as conn:
-        conn.execute("UPDATE models SET review_note = ? WHERE id = ?", (body.review_note, model_id))
-    return {"ok": True}
-
-
-@app.delete("/api/models/{model_id}")
-def delete_model(model_id: int, user: dict = Depends(auth.require_engineer)):
-    reg.delete_model(model_id)
-    return {"ok": True}
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Development only: synthetic V-belt data
-# ─────────────────────────────────────────────────────────────────────────────
 
 class GenerateBody(BaseModel):
     belts: int = Field(default=300, ge=10, le=3000)

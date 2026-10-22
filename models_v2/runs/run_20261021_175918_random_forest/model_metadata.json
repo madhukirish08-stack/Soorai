@@ -1,0 +1,240 @@
+{
+  "model_id": "run_20261021_175918_random_forest",
+  "algorithm": "random_forest",
+  "belt_type": "v_belt",
+  "training_rows": 28039,
+  "dataset": "belt_rul_training_data.csv",
+  "feature_cols": [
+    "hour",
+    "rubber_hardness_shore_a",
+    "belt_thickness_mm",
+    "tensile_strength_kn_m",
+    "belt_width_mm",
+    "belt_length_mm",
+    "cover_thickness_top_mm",
+    "pulley_alignment_mm",
+    "load_pct",
+    "belt_speed_mps",
+    "temperature_c",
+    "humidity_pct",
+    "vibration_mms",
+    "torque_nm",
+    "belt_tension_n",
+    "maintenance_count",
+    "wear_pct",
+    "elongation_pct",
+    "crack_length_mm"
+  ],
+  "target_col": "rul_hours",
+  "feature_stats": {
+    "hour": {
+      "min": 0.0,
+      "max": 19900.0,
+      "mean": 5663.044331110239,
+      "median": 4700.0,
+      "std": 4280.73928378573,
+      "p25": 2300.0,
+      "p75": 8100.0
+    },
+    "rubber_hardness_shore_a": {
+      "min": 50.6,
+      "max": 81.6,
+      "mean": 64.94142444452369,
+      "median": 65.0,
+      "std": 5.201386105253512,
+      "p25": 61.4,
+      "p75": 68.1
+    },
+    "belt_thickness_mm": {
+      "min": 12.7,
+      "max": 17.78,
+      "mean": 15.065436713149543,
+      "median": 15.04,
+      "std": 0.9612385500811909,
+      "p25": 14.4,
+      "p75": 15.68
+    },
+    "tensile_strength_kn_m": {
+      "min": 769.9,
+      "max": 1192.8,
+      "mean": 993.5202254003352,
+      "median": 991.8,
+      "std": 74.86433221576004,
+      "p25": 946.9,
+      "p75": 1040.8
+    },
+    "belt_width_mm": {
+      "min": 501.3,
+      "max": 1537.8,
+      "mean": 1000.8280216840828,
+      "median": 999.3,
+      "std": 202.8197074683516,
+      "p25": 863.9,
+      "p75": 1127.9
+    },
+    "belt_length_mm": {
+      "min": 34541.3,
+      "max": 64498.2,
+      "mean": 50198.839416526986,
+      "median": 50005.6,
+      "std": 5133.43274354925,
+      "p25": 46480.5,
+      "p75": 53571.8
+    },
+    "cover_thickness_top_mm": {
+      "min": 3.45,
+      "max": 8.76,
+      "mean": 6.021880594885695,
+      "median": 6.0,
+      "std": 1.010709116083727,
+      "p25": 5.28,
+      "p75": 6.68
+    },
+    "pulley_alignment_mm": {
+      "min": -3.77,
+      "max": 3.64,
+      "mean": -0.08896893612468348,
+      "median": -0.07,
+      "std": 1.4232604096703636,
+      "p25": -0.98,
+      "p75": 0.86
+    },
+    "load_pct": {
+      "min": 25.9,
+      "max": 110.0,
+      "mean": 67.17423231926958,
+      "median": 67.4,
+      "std": 16.44255088463434,
+      "p25": 53.8,
+      "p75": 80.4
+    },
+    "belt_speed_mps": {
+      "min": 1.44,
+      "max": 4.77,
+      "mean": 2.970005349691501,
+      "median": 2.97,
+      "std": 0.458976285119009,
+      "p25": 2.66,
+      "p75": 3.27
+    },
+    "temperature_c": {
+      "min": 10.0,
+      "max": 79.6,
+      "mean": 32.4914440600592,
+      "median": 31.8,
+      "std": 11.213343538335216,
+      "p25": 25.0,
+      "p75": 39.6
+    },
+    "humidity_pct": {
+      "min": 10.0,
+      "max": 100.0,
+      "mean": 59.64233389207889,
+      "median": 59.3,
+      "std": 15.252909023235302,
+      "p25": 49.5,
+      "p75": 69.7
+    },
+    "vibration_mms": {
+      "min": 1.0,
+      "max": 9.73,
+      "mean": 3.635660686900389,
+      "median": 3.59,
+      "std": 1.5806470806334527,
+      "p25": 2.48,
+      "p75": 4.71
+    },
+    "torque_nm": {
+      "min": 382.7,
+      "max": 1648.9,
+      "mean": 1007.5234066835479,
+      "median": 1011.4,
+      "std": 246.72366459077017,
+      "p25": 807.2,
+      "p75": 1206.6
+    },
+    "belt_tension_n": {
+      "min": 310.2,
+      "max": 1320.0,
+      "mean": 806.0916402154143,
+      "median": 809.3,
+      "std": 197.31155579786886,
+      "p25": 645.8499999999999,
+      "p75": 965.1
+    },
+    "maintenance_count": {
+      "min": 0.0,
+      "max": 19.0,
+      "mean": 5.221798209636578,
+      "median": 4.0,
+      "std": 4.277792553189259,
+      "p25": 2.0,
+      "p75": 8.0
+    },
+    "wear_pct": {
+      "min": 0.06,
+      "max": 81.52,
+      "mean": 13.087807696422841,
+      "median": 10.51,
+      "std": 10.858055182953162,
+      "p25": 4.96,
+      "p75": 18.314999999999998
+    },
+    "elongation_pct": {
+      "min": 0.007,
+      "max": 4.087,
+      "mean": 1.5820793537572666,
+      "median": 1.39,
+      "std": 1.0903658506647247,
+      "p25": 0.654,
+      "p75": 2.402
+    },
+    "crack_length_mm": {
+      "min": 0.01,
+      "max": 56.22,
+      "mean": 12.65580691180142,
+      "median": 7.7,
+      "std": 12.909242516382045,
+      "p25": 2.62,
+      "p75": 19.02
+    }
+  },
+  "rul_source": {
+    "source": "measured",
+    "message": "Using measured rul_hours column from CSV"
+  },
+  "mapping": null,
+  "test_split": "by_belt",
+  "feature_importance": {
+    "crack_length_mm": 0.4227368394963869,
+    "elongation_pct": 0.2538236055922959,
+    "hour": 0.07515883095573477,
+    "vibration_mms": 0.06437746434182559,
+    "temperature_c": 0.060982461860516576,
+    "tensile_strength_kn_m": 0.020674955475780063,
+    "cover_thickness_top_mm": 0.013246844493363481,
+    "belt_tension_n": 0.012338540330434251,
+    "belt_thickness_mm": 0.01189447273372785,
+    "torque_nm": 0.01164903521943509,
+    "belt_width_mm": 0.010596612062951575,
+    "belt_length_mm": 0.00894892464077384,
+    "pulley_alignment_mm": 0.008548426257680727,
+    "rubber_hardness_shore_a": 0.006491448683079965,
+    "maintenance_count": 0.005181864167843973,
+    "humidity_pct": 0.0042467894508515115,
+    "load_pct": 0.003599525771109481,
+    "wear_pct": 0.0031196068807777407,
+    "belt_speed_mps": 0.002383751585430764
+  },
+  "metrics": {
+    "random_forest": {
+      "mae_hours": 857.4,
+      "rmse_hours": 1621.6,
+      "r2_score": 0.8493
+    }
+  },
+  "y_max": 19900.0,
+  "y_mean": 5663.044331110239,
+  "created_at": "2026-10-21T17:59:18.356922",
+  "notes": ""
+}
