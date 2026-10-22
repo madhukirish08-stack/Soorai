@@ -139,6 +139,9 @@ label {
 }
 .unit { color: var(--text-muted); font-weight: 400; text-transform: none; }
 .hint { font-size: 11px; color: var(--text-muted); }
+.hint-warn { color: var(--amber); }
+.hint-warn[hidden] { display: none; }
+.prev-reading strong { color: var(--text); }
 
 input[type="number"], input[type="text"], input[type="password"], input[type="date"], textarea {
   background: var(--bg-input);

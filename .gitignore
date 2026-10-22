@@ -24,3 +24,7 @@ ENV/
 
 # Runtime state: client datasets, approved mappings, model versions, database
 instance/
+
+#test data
+fleet_test/
+synthetic_vbelts.csv

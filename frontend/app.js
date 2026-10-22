@@ -338,15 +338,32 @@ async function renderBelt(id) {
 
   const opFields = fieldsOfGroup('operating');
   const extraFields = (model?.feature_cols || []).filter(f => f.startsWith('x_'));
+  // Previously recorded value per field (newest inspection that measured it), so the user sees what is
+  // already on file before typing - e.g. a 2 mm crack is not re-entered as 1 mm.
+  const lastRecorded = f => {
+    for (let k = inspections.length - 1; k >= 0; k--) {
+      const v = inspections[k].readings[f];
+      if (v !== null && v !== undefined) return { value: v, hour: inspections[k].hour };
+    }
+    return null;
+  };
+  state.lastRecorded = Object.fromEntries(state.degFields.map(f => [f, lastRecorded(f)]));
   const inputFor = f => {
     const med = model?.feature_stats?.[f]?.median;
+    const prev = lastRecorded(f);
     return `<div class="form-group"><label>${esc(fieldLabel(f))}${unit(f)}</label>
-      <input type="number" step="any" data-reading="${f}" placeholder="${med !== undefined ? `typical ${fmt(med, 3)}` : ''}" /></div>`;
+      <input type="number" step="any" data-reading="${f}" placeholder="${prev ? `last ${fmt(prev.value, 3)}` : med !== undefined ? `typical ${fmt(med, 3)}` : ''}" />
+      ${prev ? `<span class="hint">Last: ${fmt(prev.value, 3)} at ${hours(prev.hour)}</span>` : ''}</div>`;
   };
-  const degInputs = state.degFields.map(f => `
+  const degInputs = state.degFields.map(f => {
+    const prev = lastRecorded(f);
+    return `
     <div class="form-group"><label>${esc(fieldLabel(f))}${unit(f)}</label>
-      <input type="number" step="any" min="0" data-reading="${f}" />
-      <span class="hint">Failure limit: ${bt.thresholds[f] !== undefined ? `${fmt(bt.thresholds[f])} ${esc(state.fields[f]?.unit || '')}` : 'not set'}</span></div>`).join('');
+      <input type="number" step="any" min="0" data-reading="${f}" data-cumulative placeholder="${prev ? `≥ ${fmt(prev.value)}` : ''}" />
+      ${prev ? `<span class="hint prev-reading">Already recorded: <strong>${fmt(prev.value)} ${esc(state.fields[f]?.unit || '')}</strong> at ${hours(prev.hour)}</span>` : '<span class="hint">Not recorded yet</span>'}
+      <span class="hint">Failure limit: ${bt.thresholds[f] !== undefined ? `${fmt(bt.thresholds[f])} ${esc(state.fields[f]?.unit || '')}` : 'not set'}</span>
+      <span class="hint hint-warn" data-warn-for="${f}" hidden></span></div>`;
+  }).join('');
 
   $('#view-belt').innerHTML = `
     <a href="#fleet" class="back-link">← Fleet</a>
@@ -368,7 +385,8 @@ async function renderBelt(id) {
           <p class="card-desc">Only operating hours are required. Leave a field empty if it wasn't measured — never enter 0 for “not measured”.</p>
           <div class="form-row cols-2">
             <div class="form-group full-width"><label>Operating hours since installation *</label>
-              <input type="number" step="any" min="0" id="insp-hour" value="${inspections.length ? lastHour + 250 : 0}" /></div>
+              <input type="number" step="any" min="0" id="insp-hour" value="${inspections.length ? lastHour + 250 : 0}" />
+              ${inspections.length ? `<span class="hint">Last inspection: ${hours(lastHour)}${inspections[inspections.length - 1].created_by_name ? ` by ${esc(inspections[inspections.length - 1].created_by_name)}` : ''}</span>` : ''}</div>
           </div>
           <div class="sub-title">Degradation measurements</div>
           <div class="form-row cols-3">${degInputs}</div>
@@ -505,6 +523,10 @@ async function addInspection() {
   if (!state.degFields.some(f => f in readings)) {
     if (!confirm('No degradation measurement entered. The health score needs at least one. Save anyway?')) return;
   }
+  // CUSTOM (user request): wear / crack / elongation only grow, so a value below the one already on
+  // file is probably a typo. Ask before saving. Do not remove this check in refactors.
+  const lower = state.degFields.filter(f => f in readings && state.lastRecorded?.[f] && readings[f] < state.lastRecorded[f].value);
+  if (lower.length && !confirm(`Lower than already recorded:\n${lower.map(f => `• ${fieldLabel(f)}: entering ${readings[f]}, but ${state.lastRecorded[f].value} was recorded at ${hours(state.lastRecorded[f].hour)}`).join('\n')}\n\nDegradation normally only increases. Save anyway?`)) return;
   const id = state.belt.belt.id;
   await api(`/api/belts/${id}/inspections`, { method: 'POST', body: { hour, readings } });
   toast('Inspection saved.', 'success');
@@ -1242,6 +1264,17 @@ const ACTIONS = {
 
 function bindEvents() {
   $('#login-form').addEventListener('submit', login);
+  // CUSTOM (user request): live warning when a degradation value is lower than the one already recorded.
+  document.addEventListener('input', e => {
+    const input = e.target.closest?.('[data-cumulative]');
+    if (!input) return;
+    const f = input.dataset.reading, prev = state.lastRecorded?.[f], v = readNumber(input);
+    const warn = $(`[data-warn-for="${f}"]`);
+    if (!warn) return;
+    const low = prev && v !== null && v < prev.value;
+    warn.hidden = !low;
+    warn.textContent = low ? `⚠ Lower than the ${fmt(prev.value)} already recorded at ${hours(prev.hour)}` : '';
+  });
   document.addEventListener('click', e => {
     const el = e.target.closest('[data-action]');
     if (!el || el.disabled) return;
