@@ -90,7 +90,7 @@ def current_user(request: Request) -> dict:
         raise HTTPException(status_code=401, detail="Not signed in.")
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT u.id, u.username, u.role FROM sessions s JOIN users u ON u.id = s.user_id "
+            "SELECT u.id, u.username, u.role, u.tours_seen FROM sessions s JOIN users u ON u.id = s.user_id "
             "WHERE s.token_hash = ? AND s.expires_at > ? AND u.active = 1",
             (_token_hash(token), now_iso()),
         ).fetchone()

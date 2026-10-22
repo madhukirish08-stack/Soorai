@@ -33,6 +33,8 @@ const state = {
   pollTimer: null,
 };
 
+// Glossary key (tour.js) for each degradation field's tooltip.
+const DEG_TIP = { elongation_pct: 'elongation', wear_pct: 'wear', crack_depth_mm: 'crack' };
 const TIER_LABEL = { red: 'Critical', amber: 'Watch', green: 'Healthy', unknown: 'No data' };
 const TIER_RANK  = { red: 0, amber: 1, unknown: 2, green: 3 };
 const FAMILY_LABEL = {
@@ -134,6 +136,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 function showLogin(message) {
   state.user = null;
+  Tour.stop();
+  $('#help-menu')?.classList.add('hidden');
   stopPolling();
   $('#app-view').classList.add('hidden');
   $('#login-view').classList.remove('hidden');
@@ -169,6 +173,7 @@ async function startApp() {
   $('#main-nav').innerHTML = nav.map(([v, l]) => `<a href="#${v}" class="nav-link" data-nav="${v}">${l}</a>`).join('');
   const [schema] = await Promise.all([api('/api/schema'), loadTypes()]);
   state.fields = schema.fields;
+  Tour.load(state.user.tours_seen);
   route();
 }
 
@@ -193,7 +198,12 @@ function route() {
   window.scrollTo({ top: 0 });
   const render = { fleet: renderFleet, belt: () => renderBelt(Number(id)), types: renderTypes,
                    data: renderData, models: renderModels, users: renderUsers }[target];
-  guarded(render);
+  guarded(async () => {
+    await render();
+    // First visit to a page starts its tour (once per user); "? Help" can force one on demand.
+    if (state.forceTour) { const key = state.forceTour; state.forceTour = null; Tour.start(key); }
+    else Tour.auto(target);
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -262,7 +272,7 @@ function drawFleetTable() {
     return;
   }
   table.innerHTML = `
-    <thead><tr><th>Status</th><th>Tag</th><th>Type</th><th>Location</th><th>Op. hours</th><th>RUL</th><th>Health</th><th>Last inspection</th><th>#</th></tr></thead>
+    <thead><tr><th>Status${Tour.tip('tier')}</th><th>Tag</th><th>Type</th><th>Location</th><th>Op. hours</th><th>RUL${Tour.tip('rul')}</th><th>Health${Tour.tip('health')}</th><th>Last inspection</th><th>#</th></tr></thead>
     <tbody>${rows.map(b => {
       const p = b.prediction;
       const status = b.status === 'in_service' ? tierChip(fleetTier(b)) : `<span class="tier tier-out">${b.status === 'failed' ? 'Failed' : 'Replaced'}</span>`;
@@ -358,10 +368,10 @@ async function renderBelt(id) {
   const degInputs = state.degFields.map(f => {
     const prev = lastRecorded(f);
     return `
-    <div class="form-group"><label>${esc(fieldLabel(f))}${unit(f)}</label>
+    <div class="form-group"><label>${esc(fieldLabel(f))}${unit(f)}${Tour.tip(DEG_TIP[f])}</label>
       <input type="number" step="any" min="0" data-reading="${f}" data-cumulative placeholder="${prev ? `≥ ${fmt(prev.value)}` : ''}" />
       ${prev ? `<span class="hint prev-reading">Already recorded: <strong>${fmt(prev.value)} ${esc(state.fields[f]?.unit || '')}</strong> at ${hours(prev.hour)}</span>` : '<span class="hint">Not recorded yet</span>'}
-      <span class="hint">Failure limit: ${bt.thresholds[f] !== undefined ? `${fmt(bt.thresholds[f])} ${esc(state.fields[f]?.unit || '')}` : 'not set'}</span>
+      <span class="hint">Failure limit${Tour.tip('limit')}: ${bt.thresholds[f] !== undefined ? `${fmt(bt.thresholds[f])} ${esc(state.fields[f]?.unit || '')}` : 'not set'}</span>
       <span class="hint hint-warn" data-warn-for="${f}" hidden></span></div>`;
   }).join('');
 
@@ -384,7 +394,7 @@ async function renderBelt(id) {
           <div class="card-title">📝 Record inspection</div>
           <p class="card-desc">Only operating hours are required. Leave a field empty if it wasn't measured — never enter 0 for “not measured”.</p>
           <div class="form-row cols-2">
-            <div class="form-group full-width"><label>Operating hours since installation *</label>
+            <div class="form-group full-width"><label>Operating hours since installation *${Tour.tip('hours')}</label>
               <input type="number" step="any" min="0" id="insp-hour" value="${inspections.length ? lastHour + 250 : 0}" />
               ${inspections.length ? `<span class="hint">Last inspection: ${hours(lastHour)}${inspections[inspections.length - 1].created_by_name ? ` by ${esc(inspections[inspections.length - 1].created_by_name)}` : ''}</span>` : ''}</div>
           </div>
@@ -399,7 +409,7 @@ async function renderBelt(id) {
           ${inService ? `
           <p class="card-desc">Recording when and why a belt failed or was replaced is the most valuable data for improving predictions.</p>
           <div class="form-row cols-3">
-            <div class="form-group"><label>Outcome</label><select id="eol-status"><option value="failed">Failed</option><option value="replaced">Replaced (planned)</option></select></div>
+            <div class="form-group"><label>Outcome${Tour.tip('outcome')}</label><select id="eol-status"><option value="failed">Failed</option><option value="replaced">Replaced (planned)</option></select></div>
             <div class="form-group"><label>At operating hour</label><input type="number" step="any" min="0" id="eol-hour" value="${lastHour || ''}" /></div>
             <div class="form-group"><label>Reason / failure mode</label><input type="text" id="eol-reason" maxlength="300" placeholder="e.g. Rib cracking" /></div>
           </div>
@@ -440,22 +450,22 @@ function latestCardHtml(p, bt, model) {
   };
   return `
     <div class="rul-card tier-border-${p.tier}">
-      <div class="rul-header">Remaining useful life ${tierChip(p.tier)}</div>
+      <div class="rul-header">Remaining useful life${Tour.tip('rul')} ${tierChip(p.tier)}</div>
       <div class="rul-value">${p.rul_hours === null ? '—' : `${Math.round(p.rul_hours).toLocaleString()} h`}</div>
       <div class="rul-sub">${p.rul_hours === null ? 'No active model for this belt type' :
         `At ${hours(p.hour)} · model v${p.model_id}${p.limit_reached ? ' · <strong>failure limit reached</strong>' : ''}`}</div>
       ${rulRange(p) ? `
       <div class="rul-interval" title="The true remaining life should fall in this range ${Math.round(p.interval_level * 100)} times out of 100">
-        <span class="rul-interval-label">${Math.round(p.interval_level * 100)}% interval</span>
+        <span class="rul-interval-label">${Math.round(p.interval_level * 100)}% interval${Tour.tip('interval')}</span>
         <span class="rul-interval-value">RUL ${rulRange(p)}</span>
       </div>` : ''}
       <div class="health-grid">
-        <div class="health-item"><div class="health-label">Health</div><div class="health-value">${p.health_score ?? '—'}${p.health_score != null ? '%' : ''}</div></div>
+        <div class="health-item"><div class="health-label">Health${Tour.tip('health')}</div><div class="health-value">${p.health_score ?? '—'}${p.health_score != null ? '%' : ''}</div></div>
         <div class="health-item"><div class="health-label">Closest to limit</div><div class="health-value risk">${esc(p.dominant_driver || '—')}</div></div>
-        ${model ? `<div class="health-item"><div class="health-label">${model.metrics.interval_coverage != null ? 'Interval hit rate (held-out)' : 'Model error (held-out)'}</div><div class="health-value">${model.metrics.interval_coverage != null ? pct(model.metrics.interval_coverage) : `± ${hours(model.metrics.mae_hours)}`}</div></div>` : ''}
+        ${model ? `<div class="health-item"><div class="health-label">${model.metrics.interval_coverage != null ? 'Interval hit rate (held-out)' : 'Model error (held-out)'}${Tour.tip(model.metrics.interval_coverage != null ? 'hit_rate' : 'mae')}</div><div class="health-value">${model.metrics.interval_coverage != null ? pct(model.metrics.interval_coverage) : `± ${hours(model.metrics.mae_hours)}`}</div></div>` : ''}
       </div>
       <div class="gauge-row">${state.degFields.map(gauge).join('')}</div>
-      <div class="hint">Gauges show each measurement as a share of the ${esc(bt.name)} failure limit.</div>
+      <div class="hint">Gauges show each measurement as a share of the ${esc(bt.name)} failure limit.${Tour.tip('gauge')}</div>
     </div>`;
 }
 
@@ -861,7 +871,7 @@ async function renderModels() {
     <div id="compare-card"></div>
     <div id="model-detail-card"></div>
     <div class="card"><div class="table-wrap"><table class="data-table">
-      <thead><tr><th></th><th>Version</th><th>Created</th><th>Belt types</th><th>Belts</th><th>Avg error</th><th>Near-failure</th><th>Bias</th><th title="Measured on belts that really failed in your fleet, using the prediction made at each inspection">Real failures</th><th>Status</th><th></th></tr></thead>
+      <thead><tr><th></th><th>Version</th><th>Created</th><th>Belt types</th><th>Belts</th><th>Avg error${Tour.tip('mae')}</th><th>Near-failure${Tour.tip('near_failure')}</th><th>Bias${Tour.tip('bias')}</th><th title="Measured on belts that really failed in your fleet, using the prediction made at each inspection">Real failures</th><th>Status</th><th></th></tr></thead>
       <tbody>${m.length ? m.map(modelRowHtml).join('') : '<tr><td colspan="11" class="empty-state">No model versions yet. Train one under Data &amp; Training.</td></tr>'}</tbody>
     </table></div></div>
     ${accuracyCardHtml(state.accuracy)}`;
@@ -936,7 +946,7 @@ function accuracyCardHtml(acc) {
       Interval hit rate should be close to the 80% the model promises. Bias above 0 means optimistic — the risky direction.</p>
     ${acc.models.some(a => a.low_sample) ? `<div class="notice notice-warn">⚠ Fewer than ${min} failed belts for some versions (marked ⚠). Treat those figures as anecdotes, not accuracy.</div>` : ''}
     <div class="table-wrap"><table class="data-table">
-      <thead><tr><th>Version</th><th>Failed belts</th><th>Predictions judged</th><th>Avg error</th><th>Bias</th><th>Interval hit rate</th></tr></thead>
+      <thead><tr><th>Version</th><th>Failed belts</th><th>Predictions judged</th><th>Avg error${Tour.tip('mae')}</th><th>Bias${Tour.tip('bias')}</th><th>Interval hit rate${Tour.tip('hit_rate')}</th></tr></thead>
       <tbody>${acc.models.map(a => `<tr><td class="strong">v${a.model_id}</td><td>${a.failed_belts}${a.low_sample ? ' ⚠' : ''}</td><td>${a.points}</td>
         <td>± ${hours(a.mae_hours)}</td><td>${biasText(a.bias_hours)}</td>
         <td>${a.interval_coverage === null ? '—' : `${Math.round(a.interval_coverage * 100)}%`}</td></tr>`).join('')}</tbody></table></div>
@@ -1228,6 +1238,19 @@ const ACTIONS = {
     renderData();
   },
   'train': startTraining,
+  'help': () => $('#help-menu').classList.toggle('hidden'),
+  'tour-page': () => {
+    $('#help-menu').classList.add('hidden');
+    const view = (location.hash.slice(1) || 'fleet').split('/')[0];
+    // The welcome tour is the fleet page's tour; other pages have their own.
+    if (!Tour.start(Tour.keyFor(view) || 'welcome')) toast('There is no tour for this page.', 'info');
+  },
+  'tour-welcome': () => {
+    $('#help-menu').classList.add('hidden');
+    if ((location.hash.slice(1) || 'fleet').split('/')[0] === 'fleet') { Tour.start('welcome'); return; }
+    state.forceTour = 'welcome';        // consumed by route() once the fleet page has rendered
+    location.hash = 'fleet';
+  },
   'generate': generateData,
   'toggle-compare': el => {
     const id = Number(el.dataset.id);
@@ -1276,6 +1299,7 @@ function bindEvents() {
     warn.textContent = low ? `⚠ Lower than the ${fmt(prev.value)} already recorded at ${hours(prev.hour)}` : '';
   });
   document.addEventListener('click', e => {
+    if (!e.target.closest('.help-wrap')) $('#help-menu')?.classList.add('hidden');
     const el = e.target.closest('[data-action]');
     if (!el || el.disabled) return;
     const fn = ACTIONS[el.dataset.action];

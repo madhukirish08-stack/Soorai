@@ -48,6 +48,13 @@
         <div class="user-box">
           <span class="user-name" id="user-name"></span>
           <span class="role-chip" id="user-role"></span>
+          <span class="help-wrap">
+            <button class="btn btn-ghost btn-sm" data-action="help" aria-haspopup="true">? Help</button>
+            <div class="help-menu hidden" id="help-menu">
+              <button class="help-item" data-action="tour-page">Tour of this page</button>
+              <button class="help-item" data-action="tour-welcome">Welcome tour</button>
+            </div>
+          </span>
           <button class="btn btn-ghost btn-sm" data-action="logout">Sign out</button>
         </div>
       </div>
@@ -73,6 +80,7 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script src="tour.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

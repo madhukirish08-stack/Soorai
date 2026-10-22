@@ -103,7 +103,8 @@ def login(body: LoginBody, request: Request, response: Response):
     token = auth.create_session(user["id"])
     response.set_cookie(auth.COOKIE_NAME, token, max_age=int(SESSION_HOURS * 3600), httponly=True,
                         secure=COOKIE_SECURE, samesite="strict", path="/")
-    return {"id": user["id"], "username": user["username"], "role": user["role"], "dev_mode": DEV_MODE}
+    return {"id": user["id"], "username": user["username"], "role": user["role"],
+            "tours_seen": [k for k in user["tours_seen"].split(",") if k], "dev_mode": DEV_MODE}
 
 
 @app.post("/api/auth/logout")
@@ -117,7 +118,29 @@ def logout(request: Request, response: Response):
 
 @app.get("/api/auth/me")
 def me(user: dict = Depends(auth.current_user)):
-    return {**user, "dev_mode": DEV_MODE}
+    return {**user, "tours_seen": [k for k in user["tours_seen"].split(",") if k], "dev_mode": DEV_MODE}
+
+
+# Guided UI tours: which ones this user has already seen, stored per account so a tour does not
+# reappear on another device. Keys are the page names used by the frontend (welcome, belt, models...).
+TOUR_KEY = r"^[a-z_]{1,20}$"
+
+
+@app.put("/api/auth/tours/{key}")
+def mark_tour_seen(key: str, user: dict = Depends(auth.current_user)):
+    if not re.match(TOUR_KEY, key):
+        bad_request("Unknown tour.")
+    seen = {k for k in user["tours_seen"].split(",") if k} | {key}
+    with get_conn() as conn:
+        conn.execute("UPDATE users SET tours_seen = ? WHERE id = ?", (",".join(sorted(seen)), user["id"]))
+    return {"tours_seen": sorted(seen)}
+
+
+@app.delete("/api/auth/tours")
+def reset_tours(user: dict = Depends(auth.current_user)):
+    with get_conn() as conn:
+        conn.execute("UPDATE users SET tours_seen = '' WHERE id = ?", (user["id"],))
+    return {"tours_seen": []}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

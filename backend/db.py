@@ -131,6 +131,8 @@ def get_conn():
 MIGRATIONS = [
     ("inspections", "predicted_low", "REAL"),
     ("inspections", "predicted_high", "REAL"),
+    # Comma-separated keys of the guided tours this user has finished or skipped (see /api/auth/tours).
+    ("users", "tours_seen", "TEXT NOT NULL DEFAULT ''"),
 ]
 
 
