@@ -17,6 +17,7 @@ as the default belt types in the app).
 
 Usage:
   python training/generate_synthetic_vbelts.py --belts 300 --step 250 --seed 42 --output out.csv
+  python training/generate_synthetic_vbelts.py --belts 300 --fleet-dir fleet_test   # files for Fleet > Import
 """
 
 import argparse
@@ -129,6 +130,8 @@ def main():
                     help="Share of belts whose log ends before failure (no failure hour), e.g. 0.3")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--output", type=Path, default=Path("synthetic_vbelts.csv"))
+    ap.add_argument("--fleet-dir", type=Path, default=None,
+                    help="Also write fleet_belts.csv + fleet_inspections.csv here, for Fleet > Import from CSV")
     args = ap.parse_args()
 
     rng = np.random.default_rng(args.seed)
@@ -138,6 +141,8 @@ def main():
     data = pd.concat(frames, ignore_index=True)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     data.to_csv(args.output, index=False)
+    if args.fleet_dir:
+        write_fleet_import_files(data, args.fleet_dir)
 
     last = data.groupby("belt_id").last()
     ended = last[last.failure_hour.notna()]
@@ -152,6 +157,22 @@ def main():
           f"({n_cens} censored = {n_cens / len(last):.0%}, no failure hour)")
     print(f"Life of failed belts (h): median {life.median():,.0f}, p10 {life.quantile(.1):,.0f}, p90 {life.quantile(.9):,.0f}")
     print("Failure driver counts:", mode.to_dict())
+
+
+# CUSTOM FIX (requested): the main CSV is a TRAINING file (many rows per belt, so a belt id repeats on purpose).
+# The app's Fleet "Import from CSV" wants two different shapes - one row per belt, and one row per inspection -
+# so feeding it the training file reports "appears twice" for every row. Do not remove this or merge the shapes.
+def write_fleet_import_files(data: pd.DataFrame, out_dir: Path) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    static = ["pitch_length_mm", "driver_pulley_dia_mm", "driven_pulley_dia_mm", "centre_distance_mm",
+              "num_pulleys", "driver_rpm", "rated_power_kw"]
+    readings = ["load_pct", "belt_tension_n", "temperature_c", "slip_pct", "vibration_mms", "maintenance_count",
+                "elongation_pct", "wear_pct", "crack_depth_mm"]
+    belts = data.groupby("belt_id", sort=False).first().reset_index()[["belt_id", "belt_type"] + static]
+    belts.rename(columns={"belt_id": "belt_tag"}).to_csv(out_dir / "fleet_belts.csv", index=False)
+    data[["belt_id", "hour"] + readings].rename(columns={"belt_id": "belt_tag"}).to_csv(
+        out_dir / "fleet_inspections.csv", index=False)
+    print(f"Wrote {len(belts)} belts and {len(data):,} inspections to {out_dir} (import belts first, then inspections)")
 
 
 def _limit(i):
